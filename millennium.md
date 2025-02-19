@@ -81,7 +81,7 @@ Identify Relevant Modules:
 Locate the sections of the Millennium Simulation code where the gravitational constant is used in calculations (e.g., gravitational force computations, structure formation algorithms).
 Implement Evolutionary Mechanism:
 Introduce a new variable or parameter within the simulation to represent the evolving gravitational constant. For example:
-'# Initialize evolving constants
+`# Initialize evolving constants
 G = G0  # Initial value of gravitational constant
 t = 0  # Cosmic time
 
@@ -91,7 +91,7 @@ def update_G():
     G += dG
     t += Delta_t
 
-# Call update_G() at each timestep'
+# Call update_G() at each timestep`
 
 Ensure Consistency:
 Verify that all references to the gravitational constant in the code now use the evolving value instead of a fixed constant.
