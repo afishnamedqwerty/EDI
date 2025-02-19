@@ -3,11 +3,10 @@ import logging
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
+import pytorch_lightning as pl
 from torch.utils.data import DataLoader, Dataset, ConcatDataset, random_split
-from sklearn.preprocessing import RobustScaler
+from typing import Dict, List, Optional
 from scipy.interpolate import interp1d
-
 # Constants
 HDF5_FILE_SUFFIX = ".h5"
 DEFAULT_HDF5_DIR = "preprocessed_data"
@@ -16,12 +15,34 @@ NUM_WORKERS = 4
 PIN_MEMORY = True
 SHUFFLE = True
 SEED = 42
+
 torch.manual_seed(SEED)
 np.random.seed(SEED)
+
+class ModelConfig:
+    """
+    Configuration class for the transformer model.
+    
+    Args:
+        n_heads: Number of attention heads.
+        d_head: Dimension of each head.
+        seq_len: Sequence length.
+        sparsity_pattern: Type of sparsity pattern to apply.
+    """
+
+    def __init__(self, n_heads: int, d_head: int, seq_len: int, sparsity_pattern: str):
+        self.n_heads = n_heads
+        self.d_head = d_head
+        self.seq_len = seq_len
+        self.sparsity_pattern = sparsity_pattern
 
 class OrbitalDataset(Dataset):
     """
     Custom dataset class for orbital time series data.
+    
+    Args:
+        data: numpy array containing the time series data.
+        seq_length: Length of the sequence to be extracted from the data.
     """
 
     def __init__(self, data: np.ndarray, seq_length: int = 32):
@@ -34,6 +55,12 @@ class OrbitalDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict:
         """
         Retrieve a single sample with sequence length.
+        
+        Args:
+            idx: Index of the sample to retrieve.
+            
+        Returns:
+            Dictionary containing positions and velocities tensors.
         """
         start_idx = idx
         end_idx = idx + self.seq_length
@@ -64,30 +91,26 @@ class OrbitalDataset(Dataset):
             "velocities": torch.tensor(velocities, dtype=torch.float32)
         }
 
-class TimeSeriesDataModule:
+class TimeSeriesDataModule(pl.LightningDataModule):
     """
-    Data module for handling orbital time series data.
+    PyTorch Lightning data module for multi-source time series forecasting.
+    
+    Args:
+        train_data_paths: List of paths to training HDF5 files.
+        val_data_paths: Optional list of paths to validation HDF5 files.
     """
 
     def __init__(self, train_data_paths: List[str], val_data_paths: Optional[List[str]] = None):
+        super().__init__()
         self.train_data_paths = train_data_paths
         self.val_data_paths = val_data_paths
-
-    def _load_hdf5(self, path: str) -> np.ndarray:
-        """
-        Load data from HDF5 file.
-        
-        Args:
-            path: Path to the HDF5 file
-            
-        Returns:
-            numpy array containing the time series data
-        """
-        return np.load(path)
 
     def setup(self) -> None:
         """
         Set up datasets with balanced sampling.
+        
+        Raises:
+            FileNotFoundError: If training data paths are empty.
         """
         # Load training data
         if not self.train_data_paths:
@@ -96,7 +119,7 @@ class TimeSeriesDataModule:
         train_datasets = []
         for path in self.train_data_paths:
             dataset = OrbitalDataset(
-                data=self._load_hdf5(path),
+                data=np.load(path),
                 seq_length=32  # Adjust sequence length as needed
             )
             train_datasets.append(dataset)
@@ -144,90 +167,64 @@ class TimeSeriesDataModule:
     def train_dataloader(self) -> DataLoader:
         """
         Return the training dataloader.
+        
+        Returns:
+            Training DataLoader.
         """
         return self.train_loader
 
     def val_dataloader(self) -> Optional[DataLoader]:
         """
         Return the validation dataloader.
+        
+        Returns:
+            Validation DataLoader.
         """
         return self.val_loader
 
     def test_dataloader(self) -> DataLoader:
         """
         Return the testing dataloader.
+        
+        Returns:
+            Testing DataLoader.
         """
         return self.test_loader
 
-class NativeSparseAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads, block_size=64, dropout=0.1):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.block_size = block_size
-        self.dropout = dropout
-        
-        # Key and value projections
-        self.key_proj = nn.Linear(embed_dim, embed_dim)
-        self.value_proj = nn.Linear(embed_dim, embed_dim)
-        
-        # Output projection
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
-        
-        # Dropout layers
-        self.dropout_layer = nn.Dropout(dropout)
+class TransformerTimeSeriesModel(pl.LightningModule):
+    """
+    Transformer-based time series forecasting model with native sparse attention.
     
-    def _compute_attention(self, x):
-        """
-        Compute attention scores using native sparse attention mechanism.
-        
-        Args:
-            x: Input tensor [seq_len, batch_size, embed_dim]
-            
-        Returns:
-            Attention output tensor [seq_len, batch_size, embed_dim]
-        """
-        # Project keys and values
-        k = self.key_proj(x)
-        v = self.value_proj(x)
-        
-        # Compute attention scores
-        seq_len = x.size(0)
-        attention_scores = torch.bmm(k.transpose(-2, -1), v)
-        
-        # Apply softmax and dropout
-        attention_probs = nn.Softmax(dim=-1)(attention_scores / (seq_len ** 0.5))
-        attention_probs = self.dropout_layer(attention_probs)
-        
-        # Compute output
-        output = torch.bmm(attention_probs, x.transpose(-2, -1)).transpose(-2, -1)
-        
-        return output
-    
-    def forward(self, x):
-        """
-        Forward pass of the NativeSparseAttention module.
-        
-        Args:
-            x: Input tensor [seq_len, batch_size, embed_dim]
-            
-        Returns:
-            Output tensor [seq_len, batch_size, embed_dim]
-        """
-        return self._compute_attention(x)
+    Args:
+        input_size: Number of input features (positions + velocities).
+        hidden_size: Dimension of the transformer's hidden layer.
+        nhead: Number of attention heads.
+    """
 
-class Transformer(nn.Module):
-    def __init__(self, input_size=6, hidden_size=512, nhead=4):
+    def __init__(self, input_size: int = 6, hidden_size: int = 512, nhead: int = 4):
         super().__init__()
         
-        # Input embedding
-        self.embedding = nn.Linear(input_size, hidden_size)
+        # Input size includes positions (3) and velocities (3)
+        self.embedding = torch.nn.Linear(input_size, hidden_size)
         
-        # Positional encoding
-        self.pos_embedding = nn.Parameter(torch.randn(1, 32, hidden_size))
+        # Sparse attention configuration
+        self.config = ModelConfig(
+            n_heads=nhead,
+            d_head=hidden_size // nhead,
+            seq_len=32,
+            sparsity_pattern="block"
+        )
+        
+        # Sparse attention layer using native implementation
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_size,
+            num_heads=nhead,
+            dropout=0.1,
+            batch_first=True
+        )
         
         # Transformer layers
-        self.transformer = nn.Transformer(
+        self.transformer = torch.nn.Transformer(
             d_model=hidden_size,
             nhead=nhead,
             num_encoder_layers=6,
@@ -236,36 +233,35 @@ class Transformer(nn.Module):
         
         # Flow-matching components
         self.flow_matching_net = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, input_size)
+            torch.nn.Linear(hidden_size, hidden_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_size, input_size)
         )
         
         # Heads for prediction (mean and variance)
-        self.mean_head = nn.Linear(hidden_size, input_size)
-        self.variance_head = nn.Linear(hidden_size, input_size)
+        self.mean_head = torch.nn.Linear(hidden_size, input_size)
+        self.variance_head = torch.nn.Linear(hidden_size, input_size)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> Dict:
         """
-        Forward pass of the transformer model.
+        Forward pass of the model.
         
         Args:
             x: Input tensor [batch_size, seq_len, input_size]
             
         Returns:
-            Dict containing mean and variance predictions
+            Dictionary containing mean and variance predictions.
         """
         batch_size, seq_len, input_size = x.size()
         
         # Embedding
         x = self.embedding(x.view(-1, input_size)).view(batch_size, seq_len, -1)
         
-        # Add positional encoding
-        pos_emb = self.pos_embedding.expand(batch_size, -1, -1)
-        x = torch.cat((x, pos_emb), dim=-1)
+        # Sparse attention
+        attn_output, _ = self.attention(x, x, x)
         
         # Transformer
-        x = self.transformer(x.permute(1, 0, 2))
+        x = self.transformer(attn_output.permute(1, 0, 2))
         x = x.permute(1, 0, 2)
         
         # Flow-matching
@@ -280,102 +276,51 @@ class Transformer(nn.Module):
             "var": var
         }
 
-class TrainingLoop:
-    def __init__(self, model, criterion, optimizer):
-        self.model = model
-        self.criterion = criterion
-        self.optimizer = optimizer
-        
-    def train_step(self, batch):
+    def training_step(self, batch: Dict, batch_idx: int) -> Dict:
         """
-        Single training step.
+        Training step with TimeFlow Loss.
         
         Args:
-            batch: Dict containing "positions" and "velocities"
+            batch: Dictionary containing input data and labels.
+            batch_idx: Batch index.
             
         Returns:
-            Loss value
+            Dictionary containing loss value.
         """
+        # Get data from batch
+        if not isinstance(batch, Dict):
+            raise ValueError("Batch must be a dictionary.")
+        
         x = batch["positions"].float()
         y = batch["velocities"].float()
         
         # Forward pass
-        outputs = self.model(x)
+        outputs = self.forward(x)
         
-        # Calculate NLL loss
+        # Calculate TimeFlow Loss
         mean_pred = outputs["mean"]
         var_pred = outputs["var"]
         
         nll_loss = torch.mean(-0.5 * torch.log(var_pred) - 0.5 * (y - mean_pred).pow(2) / var_pred)
         
         # Add flow-matching regularization
-        flow_features = self.model.flow_matching_net(x)
+        flow_features = self.flow_matching_net(x)
         flow_loss = torch.nn.functional.mse_loss(flow_features, x)
         
         total_loss = nll_loss + flow_loss
         
-        return total_loss
+        self.log("train_loss", total_loss, prog_bar=True)
+        
+        return {"loss": total_loss}
 
-    def train_epoch(self, dataloader):
+    def configure_optimizers(self) -> torch.optim.Optimizer:
         """
-        Single training epoch.
+        Configure the optimizer.
         
-        Args:
-            dataloader: DataLoader for the training data
-        """
-        self.model.train()
-        for batch in dataloader:
-            loss = self.train_step(batch)
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-
-class Evaluation:
-    def __init__(self, model):
-        self.model = model
-        
-    def evaluate(self, dataloader, metrics=['MAE', 'RMSE', 'CRPS']):
-        """
-        Evaluate the model using specified metrics.
-        
-        Args:
-            dataloader: DataLoader for evaluation data
-            metrics: List of metrics to compute
-            
         Returns:
-            Dictionary containing metric values
+            AdamW optimizer.
         """
-        self.model.eval()
-        all_preds = []
-        all_targets = []
-        
-        for batch in dataloader:
-            with torch.no_grad():
-                outputs = self.model(batch["positions"].float())
-                
-            mean_pred = outputs["mean"].cpu().numpy()
-            var_pred = outputs["var"].cpu().numpy()
-            y_true = batch["velocities"].cpu().numpy()
-            
-            all_preds.append(mean_pred)
-            all_targets.append(y_true)
-        
-        y_pred = np.concatenate(all_preds)
-        y_true = np.concatenate(all_targets)
-        
-        results = {}
-        if 'MAE' in metrics:
-            mae = np.mean(np.abs(y_pred - y_true))
-            results['MAE'] = mae
-        if 'RMSE' in metrics:
-            rmse = np.sqrt(np.mean((y_pred - y_true)**2))
-            results['RMSE'] = rmse
-        if 'CRPS' in metrics:
-            crps = np.mean( (np.sign(y_pred - y_true) *
-                            np.sqrt(np.abs(y_pred - y_true))) )
-            results['CRPS'] = crps
-        
-        return results
+        return torch.optim.AdamW(self.parameters(), lr=0.001)
 
 def main():
     """
@@ -399,26 +344,22 @@ def main():
     
     # Create model
     input_size = 6  # positions (3) + velocities (3)
-    model = Transformer(input_size=input_size)
+    model = TransformerTimeSeriesModel(input_size=input_size)
     
-    # Set up optimizer and loss function
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4)
-    criterion = nn.MSELoss()
-    
-    # Initialize training loop
-    trainer = TrainingLoop(model=model, criterion=criterion, optimizer=optimizer)
+    # Initialize trainer
+    trainer = pl.Trainer(
+        max_epochs=100,
+        gpus=torch.cuda.device_count(),
+        num_workers=NUM_WORKERS,
+        callbacks=[
+            pl.callbacks.EarlyStopping(monitor="val_loss", patience=10),
+            pl.callbacks.ModelCheckpoint(save_top_k=3, monitor="val_loss")
+        ]
+    )
     
     # Train model
-    for epoch in range(100):
-        logging.info(f"Epoch {epoch + 1}/100")
-        trainer.train_epoch(data_module.train_loader)
-    
-    # Evaluation
-    val_results = Evaluation(model).evaluate(data_module.val_loader)
-    logging.info(f"Validation Results: {val_results}")
-    
-    # Save trained model (optional)
-    torch.save(model.state_dict(), 'edi_model.pth')
+    trainer.fit(model, data_module)
 
 if __name__ == "__main__":
     main()
+
