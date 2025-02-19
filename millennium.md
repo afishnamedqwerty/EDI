@@ -92,7 +92,8 @@ def update_G():
     G += dG
     t += Delta_t
 
-# Call update_G() at each timestep```
+# Call update_G() at each timestep
+```
 
 Ensure Consistency:
 Verify that all references to the gravitational constant in the code now use the evolving value instead of a fixed constant.
