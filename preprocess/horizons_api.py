@@ -90,6 +90,7 @@ def main():
     # This can be expanded or modified based on your needs
     objects_to_fetch = [
         "399",     # Earth
+        "502",     # Europa
         "401",     # Moon
         "2000001", # Ceres
         "2000002", # Pallas
