@@ -10,6 +10,7 @@ import torch.nn.functional as F
 # timeflowloss, and split of train, test, validation sets
 
 # also this could still be wrong idk winging it
+# shout-out main-horse
 
 # Define Compressor class (hardware-aligned token compression)
 class Compressor(torch.nn.Module):
