@@ -1,365 +1,393 @@
-import os
-import logging
-import numpy as np
 import torch
-import torch.nn as nn
-import pytorch_lightning as pl
-from torch.utils.data import DataLoader, Dataset, ConcatDataset, random_split
-from typing import Dict, List, Optional
-from scipy.interpolate import interp1d
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
+import h5py
+import numpy as np
+from typing import Dict, Any
+
 # Constants
-HDF5_FILE_SUFFIX = ".h5"
-DEFAULT_HDF5_DIR = "preprocessed_data"
-BATCH_SIZE = 64
-NUM_WORKERS = 4
-PIN_MEMORY = True
-SHUFFLE = True
-SEED = 42
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+LEARNING_RATE = 1e-4
+EPOCHS = 10
+SEQ_LEN = 2880  # Context length from Sundial paper
+N_PATCHES = 16  # Patch size from Sundial paper
 
-torch.manual_seed(SEED)
-np.random.seed(SEED)
-
-class ModelConfig:
-    """
-    Configuration class for the transformer model.
-    
-    Args:
-        n_heads: Number of attention heads.
-        d_head: Dimension of each head.
-        seq_len: Sequence length.
-        sparsity_pattern: Type of sparsity pattern to apply.
-    """
-
-    def __init__(self, n_heads: int, d_head: int, seq_len: int, sparsity_pattern: str):
-        self.n_heads = n_heads
-        self.d_head = d_head
-        self.seq_len = seq_len
-        self.sparsity_pattern = sparsity_pattern
+PDS_SPICE_PATH = "PDS_archive/pds_archive.h5"
+ERA5_PATH = "ERA5_archive/era5_archive.h5"
+JPL_HORIZONS_PATH = "Horizons_archive/horizons_archive.h5"
 
 class OrbitalDataset(Dataset):
-    """
-    Custom dataset class for orbital time series data.
+    def __init__(self, data_path: str):
+        self.data = np.load(data_path)
     
-    Args:
-        data: numpy array containing the time series data.
-        seq_length: Length of the sequence to be extracted from the data.
-    """
-
-    def __init__(self, data: np.ndarray, seq_length: int = 32):
-        self.data = data
-        self.seq_length = seq_length
-
     def __len__(self) -> int:
         return len(self.data)
-
-    def __getitem__(self, idx: int) -> Dict:
-        """
-        Retrieve a single sample with sequence length.
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        sample = self.data[idx]
+        x = torch.FloatTensor(sample['features'])
+        y = torch.FloatTensor(sample['labels'])
         
-        Args:
-            idx: Index of the sample to retrieve.
-            
-        Returns:
-            Dictionary containing positions and velocities tensors.
-        """
-        start_idx = idx
-        end_idx = idx + self.seq_length
-        
-        if end_idx > len(self.data):
-            end_idx = len(self.data)
-        
-        # Get positions and velocities
-        positions = self.data[idx, :3]
-        velocities = self.data[idx, 3:]
-        
-        # Interpolate missing values
-        mask_pos = ~np.isnan(positions)
-        mask_vel = ~np.isnan(velocities)
-        
-        if np.sum(mask_pos) == 0:
-            positions = np.zeros_like(positions)
-        else:
-            positions = interp1d(mask_pos, positions[mask_pos])(idx)
-        
-        if np.sum(mask_vel) == 0:
-            velocities = np.zeros_like(velocities)
-        else:
-            velocities = interp1d(mask_vel, velocities[mask_vel])(idx)
+        # Apply re-normalization within each sample
+        x_normalized = self.re_normalize(x)
         
         return {
-            "positions": torch.tensor(positions, dtype=torch.float32),
-            "velocities": torch.tensor(velocities, dtype=torch.float32)
+            'x': x_normalized,
+            'y': y
         }
-
-class TimeSeriesDataModule(pl.LightningDataModule):
-    """
-    PyTorch Lightning data module for multi-source time series forecasting.
     
-    Args:
-        train_data_paths: List of paths to training HDF5 files.
-        val_data_paths: Optional list of paths to validation HDF5 files.
-    """
+    def re_normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Re-normalize within each sample to mitigate non-stationarity."""
+        mean = torch.mean(x, dim=1, keepdim=True)
+        std = torch.std(x, dim=1, keepdim=True)
+        return (x - mean) / (std + 1e-8)
 
-    def __init__(self, train_data_paths: List[str], val_data_paths: Optional[List[str]] = None):
-        super().__init__()
-        self.train_data_paths = train_data_paths
-        self.val_data_paths = val_data_paths
-
-    def setup(self) -> None:
-        """
-        Set up datasets with balanced sampling.
-        
-        Raises:
-            FileNotFoundError: If training data paths are empty.
-        """
-        # Load training data
-        if not self.train_data_paths:
-            raise FileNotFoundError("Training data paths are empty.")
-        
-        train_datasets = []
-        for path in self.train_data_paths:
-            dataset = OrbitalDataset(
-                data=np.load(path),
-                seq_length=32  # Adjust sequence length as needed
-            )
-            train_datasets.append(dataset)
-        
-        # Split into training, validation, and testing sets with balanced sampling
-        total_samples = sum(len(d) for d in train_datasets)
-        train_size = int(0.6 * total_samples)
-        val_size = int(0.1 * total_samples)
-        test_size = total_samples - train_size - val_size
-        
-        # Stratified split to preserve source distribution
-        train_dataset, val_dataset, test_dataset = random_split(
-            ConcatDataset(train_datasets),
-            [train_size, val_size, test_size],
-            generator=torch.Generator().manual_seed(SEED)
-        )
-
-        self.train_loader = DataLoader(
-            train_dataset,
-            batch_size=BATCH_SIZE,
-            num_workers=NUM_WORKERS,
-            pin_memory=PIN_MEMORY,
-            shuffle=SHUFFLE,
-            drop_last=True
-        )
-
-        self.val_loader = DataLoader(
-            val_dataset,
-            batch_size=BATCH_SIZE,
-            num_workers=NUM_WORKERS,
-            pin_memory=PIN_MEMORY,
-            shuffle=False,
-            drop_last=True
-        )
-
-        self.test_loader = DataLoader(
-            test_dataset,
-            batch_size=BATCH_SIZE,
-            num_workers=NUM_WORKERS,
-            pin_memory=PIN_MEMORY,
-            shuffle=False,
-            drop_last=True
-        )
-
-    def train_dataloader(self) -> DataLoader:
-        """
-        Return the training dataloader.
-        
-        Returns:
-            Training DataLoader.
-        """
-        return self.train_loader
-
-    def val_dataloader(self) -> Optional[DataLoader]:
-        """
-        Return the validation dataloader.
-        
-        Returns:
-            Validation DataLoader.
-        """
-        return self.val_loader
-
-    def test_dataloader(self) -> DataLoader:
-        """
-        Return the testing dataloader.
-        
-        Returns:
-            Testing DataLoader.
-        """
-        return self.test_loader
-
-class TransformerTimeSeriesModel(pl.LightningModule):
-    """
-    Transformer-based time series forecasting model with native sparse attention.
+class ERA5Dataset(Dataset):
+    def __init__(self, data_path: str):
+        self.data = np.load(data_path)
     
-    Args:
-        input_size: Number of input features (positions + velocities).
-        hidden_size: Dimension of the transformer's hidden layer.
-        nhead: Number of attention heads.
-    """
-
-    def __init__(self, input_size: int = 6, hidden_size: int = 512, nhead: int = 4):
-        super().__init__()
+    def __len__(self) -> int:
+        return len(self.data)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        sample = self.data[idx]
+        x = torch.FloatTensor(sample['features'])
+        y = torch.FloatTensor(sample['labels'])
         
-        # Input size includes positions (3) and velocities (3)
-        self.embedding = torch.nn.Linear(input_size, hidden_size)
-        
-        # Sparse attention configuration
-        self.config = ModelConfig(
-            n_heads=nhead,
-            d_head=hidden_size // nhead,
-            seq_len=32,
-            sparsity_pattern="block"
-        )
-        
-        # Sparse attention layer using native implementation
-        self.attention = nn.MultiheadAttention(
-            embed_dim=hidden_size,
-            num_heads=nhead,
-            dropout=0.1,
-            batch_first=True
-        )
-        
-        # Transformer layers
-        self.transformer = torch.nn.Transformer(
-            d_model=hidden_size,
-            nhead=nhead,
-            num_encoder_layers=6,
-            num_decoder_layers=6
-        )
-        
-        # Flow-matching components
-        self.flow_matching_net = nn.Sequential(
-            torch.nn.Linear(hidden_size, hidden_size),
-            torch.nn.ReLU(),
-            torch.nn.Linear(hidden_size, input_size)
-        )
-        
-        # Heads for prediction (mean and variance)
-        self.mean_head = torch.nn.Linear(hidden_size, input_size)
-        self.variance_head = torch.nn.Linear(hidden_size, input_size)
-
-    def forward(self, x: torch.Tensor) -> Dict:
-        """
-        Forward pass of the model.
-        
-        Args:
-            x: Input tensor [batch_size, seq_len, input_size]
-            
-        Returns:
-            Dictionary containing mean and variance predictions.
-        """
-        batch_size, seq_len, input_size = x.size()
-        
-        # Embedding
-        x = self.embedding(x.view(-1, input_size)).view(batch_size, seq_len, -1)
-        
-        # Sparse attention
-        attn_output, _ = self.attention(x, x, x)
-        
-        # Transformer
-        x = self.transformer(attn_output.permute(1, 0, 2))
-        x = x.permute(1, 0, 2)
-        
-        # Flow-matching
-        flow_features = self.flow_matching_net(x)
-        
-        # Predict mean and variance
-        mean = self.mean_head(flow_features)
-        var = torch.nn.functional.softplus(self.variance_head(flow_features)) + 1e-6
+        # Apply re-normalization within each sample
+        x_normalized = self.re_normalize(x)
         
         return {
-            "mean": mean,
-            "var": var
+            'x': x_normalized,
+            'y': y
         }
+    
+    def re_normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Re-normalize within each sample to mitigate non-stationarity."""
+        mean = torch.mean(x, dim=1, keepdim=True)
+        std = torch.std(x, dim=1, keepdim=True)
+        return (x - mean) / (std + 1e-8)
 
-    def training_step(self, batch: Dict, batch_idx: int) -> Dict:
-        """
-        Training step with TimeFlow Loss.
+class JPLDataset(Dataset):
+    def __init__(self, data_path: str):
+        self.data = np.load(data_path)
+    
+    def __len__(self) -> int:
+        return len(self.data)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        sample = self.data[idx]
+        x = torch.FloatTensor(sample['features'])
+        y = torch.FloatTensor(sample['labels'])
         
-        Args:
-            batch: Dictionary containing input data and labels.
-            batch_idx: Batch index.
+        # Apply re-normalization within each sample
+        x_normalized = self.re_normalize(x)
+        
+        return {
+            'x': x_normalized,
+            'y': y
+        }
+    
+    def re_normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Re-normalize within each sample to mitigate non-stationarity."""
+        mean = torch.mean(x, dim=1, keepdim=True)
+        std = torch.std(x, dim=1, keepdim=True)
+        return (x - mean) / (std + 1e-8)
+
+class PatchEmbedding(nn.Module):
+    def __init__(self, seq_len: int = SEQ_LEN, patch_size: int = N_PATCHES):
+        super().__init__()
+        self.seq_len = seq_len
+        self.patch_size = patch_size
+        self.num_patches = seq_len // patch_size
+        
+        # Embedding layer for patches
+        self.embedding = nn.Linear(patch_size, 512)
+        
+        # Positional embeddings for patches
+        self.position_embeddings = nn.Embedding(self.num_patches + 1, 512)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Convert input time series into patch embeddings."""
+        batch_size = x.size(0)
+        
+        # Reshape the input to extract patches
+        x_patched = x.view(batch_size, self.num_patches, self.patch_size, -1)
+        
+        # Compute mean and other features for each patch
+        patch_features = torch.mean(x_patched, dim=2)  # Simplified example
+        
+        # Embed the patch features
+        embedded = self.embedding(patch_features)
+        
+        # Add positional embeddings
+        positions = torch.arange(self.num_patches).expand(batch_size, -1).to(x.device)
+        pos_embeddings = self.position_embeddings(positions)
+        embedded += pos_embeddings.unsqueeze(0)
+        
+        return embedded.permute(0, 2, 1)  # (batch_size, embed_dim, num_patches)
+
+class NSparseAttention(nn.Module):
+    def __init__(self, embed_dim: int = 512, num_heads: int = 8):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        
+        # Parameter vector 𝜑 for sparse attention
+        self.phi = nn.Parameter(torch.randn(1, self.num_heads, self.head_dim))
+        
+        # Positional embeddings for temporal modeling
+        self.position_embeddings = nn.Embedding(SEQ_LEN, embed_dim)
+
+    def apply_sparse_attention(self, attn_probs: torch.Tensor, seq_len: int) -> torch.Tensor:
+        """Apply dynamic hierarchical sparse attention pattern."""
+        # Coarse-grained token compression
+        block_size = 64  # Adjust based on your requirements
+        num_blocks = (seq_len + block_size - 1) // block_size
+        
+        # Initialize coarse mask for intra-block attention
+        coarse_mask = torch.zeros(seq_len, seq_len).bool()
+        for i in range(num_blocks):
+            start = i * block_size
+            end = min((i + 1) * block_size, seq_len)
+            coarse_mask[start:end, start:end] = True
+        
+        # Fine-grained token selection using phi
+        fine_mask = torch.zeros_like(coarse_mask)
+        for i in range(num_blocks):
+            start = i * block_size
+            end = min((i + 1) * block_size, seq_len)
             
-        Returns:
-            Dictionary containing loss value.
-        """
-        # Get data from batch
-        if not isinstance(batch, Dict):
-            raise ValueError("Batch must be a dictionary.")
+            # Select specific tokens within the block based on phi
+            q_block = self.phi[:, :, :end - start]  # Adjust indices as needed
+            similarity_scores = torch.bmm(q_block.unsqueeze(2), q_block.unsqueeze(1))
+            top_k = min(8, end - start)  # Select top-k similar tokens
+            
+            # Get indices of top-k scores
+            _, indices = torch.topk(similarity_scores.squeeze(), k=top_k, dim=0)
+            
+            # Mark selected positions in the fine mask
+            for idx in indices:
+                if idx < (end - start):
+                    fine_mask[start + idx] = True
         
-        x = batch["positions"].float()
-        y = batch["velocities"].float()
+        # Combine coarse and fine masks
+        combined_mask = coarse_mask & fine_mask
         
-        # Forward pass
-        outputs = self.forward(x)
+        # Apply the combined mask to attention probabilities
+        attn_probs[~combined_mask] = -torch.inf  # Zero out non-selected positions
         
-        # Calculate TimeFlow Loss
-        mean_pred = outputs["mean"]
-        var_pred = outputs["var"]
-        
-        nll_loss = torch.mean(-0.5 * torch.log(var_pred) - 0.5 * (y - mean_pred).pow(2) / var_pred)
-        
-        # Add flow-matching regularization
-        flow_features = self.flow_matching_net(x)
-        flow_loss = torch.nn.functional.mse_loss(flow_features, x)
-        
-        total_loss = nll_loss + flow_loss
-        
-        self.log("train_loss", total_loss, prog_bar=True)
-        
-        return {"loss": total_loss}
+        return attn_probs
 
-    def configure_optimizers(self) -> torch.optim.Optimizer:
-        """
-        Configure the optimizer.
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass with native sparse attention."""
+        batch_size, seq_len, _ = x.size()
         
-        Returns:
-            AdamW optimizer.
-        """
-        return torch.optim.AdamW(self.parameters(), lr=0.001)
+        # Incorporate positional embeddings
+        pos_embeddings = self.position_embeddings(torch.arange(seq_len, device=x.device))
+        x_with_pos = x + pos_embeddings.unsqueeze(0)
+        
+        # Compute query vectors using phi
+        q = x_with_pos + self.phi  # (batch_size, seq_len, head_dim)
+        
+        # Reshape for block-wise processing
+        '''q_reshaped = q.view(batch_size, num_blocks, block_size, self.head_dim)
+        
+        # Compute attention scores in blocks
+        attn_scores = torch.bmm(q_reshaped.unsqueeze(2), q_reshaped.unsqueeze(1)) / np.sqrt(self.head_dim)
+        
+        # Apply softmax to get probability distribution (block-wise)
+        attn_probs = torch.softmax(attn_scores, dim=-1)
+        
+        # Apply sparse attention pattern
+        attn_probs = self.apply_sparse_attention(attn_probs.view(batch_size, seq_len, seq_len), seq_len)'''
 
-def main():
-    """
-    Main function to train the model with multi-source balanced sampling.
-    """
-    # Initialize logger
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    # Create data module with all training and validation paths
-    train_data_paths = [
-        os.path.join(DEFAULT_HDF5_DIR, "pds_spice.h5"),
-        os.path.join(DEFAULT_HDF5_DIR, "era5.h5"),
-        os.path.join(DEFAULT_HDF5_DIR, "jpl_horizons.h5")
-    ]
-    
-    data_module = TimeSeriesDataModule(train_data_paths=train_data_paths)
-    data_module.setup()
-    
-    # Create model
-    input_size = 6  # positions (3) + velocities (3)
-    model = TransformerTimeSeriesModel(input_size=input_size)
-    
-    # Initialize trainer
-    trainer = pl.Trainer(
-        max_epochs=100,
-        gpus=torch.cuda.device_count(),
-        num_workers=NUM_WORKERS,
-        callbacks=[
-            pl.callbacks.EarlyStopping(monitor="val_loss", patience=10),
-            pl.callbacks.ModelCheckpoint(save_top_k=3, monitor="val_loss")
-        ]
-    )
-    
-    # Train model
-    trainer.fit(model, data_module)
+        # Compute attention scores
+        attn_scores = torch.bmm(q.unsqueeze(2), q.unsqueeze(1)) / np.sqrt(self.head_dim)
+        
+        # Apply softmax to get probability distribution
+        attn_probs = torch.softmax(attn_scores, dim=-1)
+        
+        # Apply sparse attention pattern (dynamic hierarchical sparsity)
+        attn_probs = self.apply_sparse_attention(attn_probs, seq_len)
+        
+        # Compute the final output using the attention mechanism
+        out = torch.bmm(x.unsqueeze(2), attn_probs.permute(0, 2, 1))[:, :, 0]
+        
+        return out
 
-if __name__ == "__main__":
-    main()
 
+class TimeFlowLoss(nn.Module):
+    def __init__(self, d_model: int = 512):
+        super().__init__()
+        self.flow_params = nn.Parameter(torch.randn(d_model))
+    
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Forward pass with TimeFlow Loss."""
+        batch_size, seq_len, _ = x.size()
+        
+        # Compute flow probabilities
+        flow_logits = x + self.flow_params.unsqueeze(1).unsqueeze(2)
+        flow_probs = torch.sigmoid(flow_logits)
+        
+        # Calculate the loss based on flow matching
+        loss = torch.mean((flow_probs - y.unsqueeze(-1)) ** 2)
+        
+        return loss
+
+def create_stratified_dataloaders(datasets: Dict[str, Dataset]) -> Dict[str, DataLoader]:
+    """Create balanced dataloaders using stratified sampling."""
+    dataloaders = {}
+    
+    # Stratified k-fold for each dataset
+    for name, dataset in datasets.items():
+        train_indices = list(range(len(dataset)))
+        np.random.shuffle(train_indices)
+        
+        train_sampler = torch.utils.data.SubsetRandomSampler(train_indices[:-100])
+        val_sampler = torch.utils.data.SubsetRandomSampler(train_indices[-100:])
+        
+        dataloaders[name] = DataLoader(
+            dataset,
+            batch_size=64,
+            sampler=train_sampler if name != 'test' else val_sampler,
+            num_workers=4
+        )
+    
+    return dataloaders
+
+def train_model(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    criterion: nn.Module,
+    dataloaders: Dict[str, DataLoader],
+    device: str,
+    num_epochs: int = EPOCHS,
+) -> None:
+    """Train the model with balanced sampling and evaluation."""
+    best_val_loss = float('inf')
+    
+    for epoch in range(num_epochs):
+        # Training phase
+        model.train()
+        for batch_idx, (x, y) in enumerate(dataloaders['train']):
+            x = x.to(device)
+            y = y.to(device)
+            
+            # Apply patch embeddings and re-normalization
+            x_patched = PatchEmbedding()(x.permute(0, 2, 1))  # (batch_size, embed_dim, num_patches)
+            x_embedded = x_patched.permute(0, 2, 1)  # (batch_size, num_patches, embed_dim)
+            
+            # Forward pass with sparse attention
+            outputs = model(x_embedded)  # (batch_size, num_patches, embed_dim)
+            
+            # Reshape for loss calculation
+            outputs_reshaped = outputs.permute(0, 2, 1)  # (batch_size, embed_dim, num_patches)
+            
+            loss = criterion(outputs_reshaped, y.permute(0, 2, 1))
+            
+            # Backward pass and optimization
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            if batch_idx % 100 == 0:
+                print(f'Epoch: {epoch+1}/{num_epochs}, Batch: {batch_idx}, Loss: {loss.item():.4f}')
+        
+        # Validation phase
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for x_val, y_val in dataloaders['test']:
+                x_val = x_val.to(device)
+                y_val = y_val.to(device)
+                
+                # Apply patch embeddings and re-normalization
+                x_patched_val = PatchEmbedding()(x_val.permute(0, 2, 1))  # (batch_size, embed_dim, num_patches)
+                x_embedded_val = x_patched_val.permute(0, 2, 1)  # (batch_size, num_patches, embed_dim)
+                
+                outputs_val = model(x_embedded_val)  # (batch_size, num_patches, embed_dim)
+                
+                # Reshape for loss calculation
+                outputs_reshaped_val = outputs_val.permute(0, 2, 1)  # (batch_size, embed_dim, num_patches)
+                
+                loss_val = criterion(outputs_reshaped_val, y_val.permute(0, 2, 1))
+                
+                val_loss += loss_val.item()
+        
+        avg_val_loss = val_loss / len(dataloaders['test'])
+        print(f"Epoch {epoch+1}/{num_epochs}, Val Loss: {avg_val_loss}")
+        
+        # Save model if best validation loss
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), 'best_model.pth')
+    
+    # Calculate additional metrics
+    metric_mae = nn.L1Loss()
+    metric_rmse = lambda x, y: torch.sqrt(torch.mean((x - y) ** 2))
+    metric_crps = lambda x, y: torch.mean(torch.abs(x - y))
+    metric_wql = lambda x, y: torch.mean((x - y) ** 2)
+    
+    with torch.no_grad():
+        total_mae = 0.0
+        total_rmse = 0.0
+        total_crps = 0.0
+        total_wql = 0.0
+        
+        for x_val, y_val in dataloaders['test']:
+            x_val = x_val.to(device)
+            y_val = y_val.to(device)
+            
+            # Generate multiple predictions (e.g., 20 samples)
+            samples = [model(x_val.permute(0, 2, 1)) for _ in range(20)]
+            preds = torch.stack(samples, dim=0)  # (num_samples, batch_size, seq_len, embed_dim)
+            
+            mae = metric_mae(preds.mean(dim=0), y_val.permute(0, 2, 1))
+            rmse = metric_rmse(preds.mean(dim=0), y_val.permute(0, 2, 1))
+            crps = metric_crps(preds, y_val.permute(0, 2, 1).unsqueeze(0).expand_as(preds))
+            wql = metric_wql(preds, y_val.permute(0, 2, 1).unsqueeze(0).expand_as(preds))
+            
+            total_mae += mae.item()
+            total_rmse += rmse.item()
+            total_crps += crps.item()
+            total_wql += wql.item()
+    
+    avg_mae = total_mae / len(dataloaders['test'])
+    avg_rmse = total_rmse / len(dataloaders['test'])
+    avg_crps = total_crps / len(dataloaders['test'])
+    avg_wql = total_wql / len(dataloaders['test'])
+    
+    print(f"Final Metrics - MAE: {avg_mae:.4f}, RMSE: {avg_rmse:.4f}, CRPS: {avg_crps:.4f}, WQL: {avg_wql:.4f}")
+
+# Initialize datasets
+pds_dataset = OrbitalDataset(PDS_SPICE_PATH)
+era5_dataset = ERA5Dataset(ERA5_PATH)
+jpl_dataset = JPLDataset(JPL_HORIZONS_PATH)
+
+# Combine datasets for stratified sampling
+datasets = {
+    'PDS': pds_dataset,
+    'ERA5': era5_dataset,
+    'JPL': jpl_dataset,
+}
+
+# Create balanced dataloaders
+dataloaders = create_stratified_dataloaders(datasets)
+
+# Initialize model and optimizer
+model = NSparseAttention(embed_dim=512, num_heads=8).to(DEVICE)
+optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+criterion = TimeFlowLoss(d_model=512)
+
+# Train the model
+train_model(
+    model=model,
+    optimizer=optimizer,
+    criterion=criterion,
+    dataloaders=dataloaders,
+    device=DEVICE,
+    num_epochs=EPOCHS
+)

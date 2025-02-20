@@ -21,7 +21,7 @@ class HorizonsApiClient:
         self,
         spkid: str,
         start_time: str = DEFAULT_START_TIME,
-        stop_time: DEFAULT_STOP_TIME
+        stop_time: str = DEFAULT_STOP_TIME
     ) -> Optional[Path]:
         """Fetches an SPK file for a given object from the Horizons API."""
         try:

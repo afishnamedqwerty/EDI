@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import torch.nn.functional as F
 
-
 # Still need to frankenstein this into nsa_train.py for included flow matching, 
 # timeflowloss, and split of train, test, validation sets
 
