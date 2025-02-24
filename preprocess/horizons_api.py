@@ -1,7 +1,6 @@
 from astropy.coordinates import CartesianDifferential
 from astropy.time import Time
 from astropy.units import Quantity
-import timezone
 import sys
 import json
 import csv
@@ -9,6 +8,7 @@ import base64
 import requests
 import pandas as pd
 import numpy as np
+import timezone
 from io import StringIO
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,8 +17,8 @@ from typing import Dict, List, Optional
 # Constants
 API_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
 FORMAT = "json"
-DEFAULT_START_TIME = "2030-01-01"
-DEFAULT_STOP_TIME = "2031-01-01"
+DEFAULT_START_TIME = "2023-01-01"
+DEFAULT_STOP_TIME = "2024-01-01"
 step_size = "1d"
 
 class HorizonsApiClient:
@@ -88,6 +88,7 @@ class HorizonsApiClient:
             print(f"Error fetching ephemeris data for object {object_id}: {str(e)}")
             return None
 
+    # Still unsure about parquet vs HDF5 tbh, Sundial formats Timebench to parquets so I'm now leaning that direction
     def preprocess_ephemeris(self, data: str, object_id: str) -> Optional[Path]:
         """
         Processes raw ephemeris data from JPL Horizons API and saves it as a Parquet file.
@@ -134,7 +135,7 @@ class HorizonsApiClient:
                 return None
                 
             # Define column names based on the structure of the ephemeris data
-            columns = [
+            headers = [
                 'JDTDB',      # Julian Date in TDB
                 'X',          # X position (km)
                 'Y',          # Y position (km)
@@ -148,6 +149,7 @@ class HorizonsApiClient:
             ]
             
             # Parse data rows
+            # is it useful to map position and velocity in the parquet beforehand or keep each coordinate idk questions
             data_rows = []
             for line in data_lines:
                 parts = [x.strip() for x in line.split()]
@@ -159,14 +161,20 @@ class HorizonsApiClient:
                 jdtdb = float(parts[0])
                 position = list(map(float, parts[1:4]))
                 velocity = list(map(float, parts[4:7]))
+                #x = float(parts[1])
+                #y = float(parts[2])
+                #z = float(parts[3])
+                #vx = float(parts[4])
+                #vy = float(parts[5])
+                #vz = float(parts[6])
                 lt = float(parts[7])
                 rg = float(parts[8])
                 rr = float(parts[9])
 
                 # Calculate additional columns if needed
                 ra, dec = self.cartesian_to_equatorial(position)
-                uncertainty_ra = np.nan  # Placeholder for uncertainty in RA (to be determined)
-                uncertainty_dec = np.nan  # Placeholder for uncertainty in Dec (to be determined)
+                #uncertainty_ra = np.nan  # Placeholder for uncertainty in RA (to be determined)
+                #uncertainty_dec = np.nan  # Placeholder for uncertainty in Dec (to be determined)
                 azimuth = np.nan           # For observer-based ephemeris
                 elevation = np.nan         # For observer-based ephemeris
                 distance = rg              # Use range as distance
@@ -185,17 +193,20 @@ class HorizonsApiClient:
                     'vx': velocity[0],
                     'vy': velocity[1],
                     'vz': velocity[2],
-                    'uncertainty_ra': uncertainty_ra,
-                    'uncertainty_dec': uncertainty_dec,
+                    #'uncertainty_ra': uncertainty_ra,
+                    #'uncertainty_dec': uncertainty_dec,
                     'source': 'JPL Horizons API'
                 })
                 
             # Create DataFrame with the desired schema
             df = pd.DataFrame(data_rows)
+            print(f"ayo df: {df}")
+            df['JDTDB'] = pd.to_numeric(df['JDTDB'], downcast='float')
             
             # Add global metadata
             metadata = {
-                'object_name': self.get_object_name(object_id),
+                #'object_name': self.get_object_name(object_id),
+                'object_name': object_id,
                 'reference_frame': 'J2000',
                 'observer_location': 'Earth (399)',
                 'start_time': DEFAULT_START_TIME,
@@ -420,14 +431,14 @@ class HorizonsApiClient:
 def main():
     # List of objects to fetch (example list)
     objects_to_fetch = [
-        "399",     # Earth
+        #"399",     # Earth
         "502",     # Europa
-        "401",     # Moon
-        "2000001", # Ceres
-        "2000002", # Pallas
-        "2000003", # Vesta
-        "141P",    # Comet Machholz 2
-        "DELD98A"  # Example asteroid designation
+        #"401",     # Moon
+        #"2000001", # Ceres
+        #"2000002", # Pallas
+        #"2000003", # Vesta
+        #"141P",    # Comet Machholz 2
+        #"DELD98A"  # Example asteroid designation
     ]
     
     # Initialize the Horizons client
