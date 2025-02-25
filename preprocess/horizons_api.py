@@ -26,7 +26,7 @@ DEFAULT_STOP_TIME = "2024-01-01"
 step_size = "1d" #for actual training we'll want granularity (1min or 10min step size)
 
 class HorizonsApiClient:
-    """A client class to interact with the Horizons API for SPK data retrieval."""
+    """A client class to interact with the Horizons API for Ephemeris and SPK data retrieval."""
     
     def __init__(self, output_dir: str = "spk_files"):
         self.output_dir = Path(output_dir)
@@ -57,10 +57,24 @@ class HorizonsApiClient:
         if "P" in object_id or "-" in object_id:
             cmd += ";NOFRAG;CAP"
         
+        # Example QUANTITIES for OBSERVER Type
+        #    The QUANTITIES parameter can be set to a comma-separated list of integers representing the desired observable quantities. For example:
+
+        #    1: RA (Right Ascension) in hours.
+        #    2: Dec (Declination) in degrees.
+        #    3: Azimuth in degrees.
+        #    4: Elevation in degrees.
+        #    5: Range in kilometers.
+        #    9: Range rate in km/s.
+        #    20: Uncertainty in RA (arcseconds).
+        #    23: Uncertainty in Dec (arcseconds).
+        #    24: Uncertainty in Azimuth (arcminutes).
+        #    29: Uncertainty in Elevation (arcminutes).
 
         obs_params = {
             "format": FORMAT,
             "COMMAND": cmd,
+            "OBJECT_DATA": "YES",
             "MAKE_EPHEM": "YES",
             "EPHEM_TYPE": "OBSERVER",  # Vector ephemeris
             "CENTER": "500@399",      # Earth-centered
@@ -68,10 +82,11 @@ class HorizonsApiClient:
             "STOP_TIME": stop_time,
             "STEP_SIZE": step_size,
             "ANG_FORMAT": "DEG",
-            "EXTRA_PREC": "YES"
+            "EXTRA_PREC": "YES",
             #"CSV_FORMAT": "YES"
-            #"QUANTITIES": "1,2,3,4"   # RA, DEC, delta, deldot
+            "QUANTITIES": "1,2,3,4,5,9,20,23,24,29"   # RA, DEC, delta, deldot
         }
+
         vec_params = {
             "format": FORMAT,
             "COMMAND": cmd,
@@ -84,12 +99,43 @@ class HorizonsApiClient:
             #"CSV_FORMAT": "YES"
             #"QUANTITIES": "1,2,3,4"   # RA, DEC, delta, deldot
         }
+
+        # Example QUANTITIES for ELEMENTS Type
+        # The QUANTITIES parameter can be set to a comma-separated list of integers representing the desired orbital elements. For example:
+
+        # 1: RA of ascending node (Ω) in degrees.
+        # 2: Inclination (i) in degrees.
+        # 3: Eccentricity (e).
+        # 4: Argument of perihelion (ω) in degrees.
+        # 5: Mean anomaly (M0) in degrees.
+        # 6: Semi-major axis (a) in AU.
+        # 7: Longitude of ascending node (Ω) rate in arcseconds/year.
+        # 8: Inclination rate in arcseconds/year.
+        # 9: Eccentricity rate in dimensionless units.
+        # 10: Argument of perihelion rate in arcseconds/year.
+        # 11: Mean anomaly rate in degrees/year.
+        
+        elem_params = {
+            "format": FORMAT,
+            "COMMAND": cmd,
+            "OBJECT_DATA": "YES",
+            "MAKE_EPHEM": "YES",
+            "EPHEM_TYPE": "ELEMENTS",  # Vector ephemeris
+            "CENTER": "0@399",      # Earth-centered
+            "START_TIME": start_time,
+            "STOP_TIME": stop_time,
+            "STEP_SIZE": step_size,
+            "ANG_FORMAT": "DEG",
+            "EXTRA_PREC": "YES",
+            #"CSV_FORMAT": "YES"
+            "QUANTITIES": "1,2,3,4,5,6,7,8,9,10,11"   # RA, DEC, delta, deldot
+        }
         
         try:
             response = requests.get(API_URL, params=vec_params)
             if response.status_code == 200:
                 #data = json.loads(response.text)
-                output_path = self.preprocess_ephemeris_vec(response.text, object_id)
+                output_path = self.preprocess_ephemeris(response.text, object_id)
                 
                 # Check for specific errors in the API response
                 '''if "error" in data:
@@ -108,7 +154,7 @@ class HorizonsApiClient:
             return None
         
     # Preprocesses vec_params ephemeris data into dataframe parquet file
-    def preprocess_ephemeris_vec(self, data: str, object_id: str) -> Optional[Path]:
+    def preprocess_ephemeris(self, data: str, object_id: str) -> Optional[Path]:
         """
         Processes raw ephemeris data from JPL Horizons API and saves it as a Parquet file.
         
@@ -246,12 +292,13 @@ class HorizonsApiClient:
             # Get object name
             obj_name = self.get_object_name(object_id)
             print(f"\nObject ID {object_id} is {obj_name}\n")
-            print(f"\nObject ID {object_id} df contents: {df}\n")
             
             # Add metadata columns
             df['object_id'] = object_id
             df['object_name'] = obj_name
             df['reference_frame'] = 'Ecliptic of J2000.0'
+
+            print(f"\nObject ID {object_id} df contents: {df}\n")
             
             # Save to Parquet file
             filename = f"ephemeris_{obj_name}_{DEFAULT_START_TIME.replace('-', '')}_{DEFAULT_STOP_TIME.replace('-', '')}.parquet"
