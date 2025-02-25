@@ -9,18 +9,21 @@ import requests
 import pandas as pd
 import numpy as np
 #import timezone
+import traceback
 from io import StringIO
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 import pytz
+import re
+#import plt
 
 # Constants
 API_URL = "https://ssd.jpl.nasa.gov/api/horizons.api"
 FORMAT = "json"
 DEFAULT_START_TIME = "2023-01-01"
 DEFAULT_STOP_TIME = "2024-01-01"
-step_size = "1d"
+step_size = "1d" #for actual training we'll want granularity (1min or 10min step size)
 
 class HorizonsApiClient:
     """A client class to interact with the Horizons API for SPK data retrieval."""
@@ -54,7 +57,22 @@ class HorizonsApiClient:
         if "P" in object_id or "-" in object_id:
             cmd += ";NOFRAG;CAP"
         
-        params = {
+
+        obs_params = {
+            "format": FORMAT,
+            "COMMAND": cmd,
+            "MAKE_EPHEM": "YES",
+            "EPHEM_TYPE": "OBSERVER",  # Vector ephemeris
+            "CENTER": "500@399",      # Earth-centered
+            "START_TIME": start_time,
+            "STOP_TIME": stop_time,
+            "STEP_SIZE": step_size,
+            "ANG_FORMAT": "DEG",
+            "EXTRA_PREC": "YES"
+            #"CSV_FORMAT": "YES"
+            #"QUANTITIES": "1,2,3,4"   # RA, DEC, delta, deldot
+        }
+        vec_params = {
             "format": FORMAT,
             "COMMAND": cmd,
             "MAKE_EPHEM": "YES",
@@ -68,10 +86,10 @@ class HorizonsApiClient:
         }
         
         try:
-            response = requests.get(API_URL, params=params)
+            response = requests.get(API_URL, params=vec_params)
             if response.status_code == 200:
                 #data = json.loads(response.text)
-                output_path = self.preprocess_ephemeris(response.text, object_id)
+                output_path = self.preprocess_ephemeris_vec(response.text, object_id)
                 
                 # Check for specific errors in the API response
                 '''if "error" in data:
@@ -88,8 +106,179 @@ class HorizonsApiClient:
         except Exception as e:
             print(f"Error fetching ephemeris data for object {object_id}: {str(e)}")
             return None
+        
+    # Preprocesses vec_params ephemeris data into dataframe parquet file
+    def preprocess_ephemeris_vec(self, data: str, object_id: str) -> Optional[Path]:
+        """
+        Processes raw ephemeris data from JPL Horizons API and saves it as a Parquet file.
+        
+        Args:
+            data (str): Raw response string from the Horizons API
+            object_id (str): ID of the target object
+            
+        Returns:
+            Path: Path to the saved Parquet file if successful. None otherwise.
+        """
+        try:
+            
+            # Find the positions of $$SOE and $$EOE markers
+            soe_start = data.find("$$SOE")
+            eoe_end = data.find("$$EOE")
+            
+            if soe_start == -1 or eoe_end == -1:
+                print(f"No SOE or EOE markers found for object {object_id}")
+                return None
+                
+            # Extract the data section between $$SOE and $$EOE
+            raw_data = data[soe_start+5:eoe_end].strip()
+            
+            if not raw_data:
+                print(f"Empty data section for object {object_id}")
+                return None
+            
+            # Print raw data information for debugging
+            print(f"Raw data length: {len(raw_data)}")
+            print(f"First 200 chars: {raw_data[:200]}")
+            
+            # Approach: Use regex to find each data point directly
+            
+            # Find all JDTDB entries
+            jdtdb_pattern = r"(\d+\.\d+)\s*=\s*A\.D\."
+            jdtdb_matches = re.finditer(jdtdb_pattern, raw_data)
+            
+            # Store positions of each match to determine data blocks
+            jdtdb_positions = [(m.start(), m.group(1)) for m in jdtdb_matches]
+            
+            print(f"Found {len(jdtdb_positions)} JDTDB entries")
+            
+            if len(jdtdb_positions) == 0:
+                print("No JDTDB values found in data")
+                return None
+            
+            # Initialize list to store parsed data
+            data_rows = []
+            
+            # Process each data block
+            for i, (pos, jdtdb_str) in enumerate(jdtdb_positions):
+                try:
+                    # Determine the end position of this block (start of next block or end of data)
+                    end_pos = jdtdb_positions[i+1][0] if i < len(jdtdb_positions)-1 else len(raw_data)
+                    
+                    # Extract the entire data block for this time point
+                    block = raw_data[pos:end_pos]
+                    
+                    # Parse JDTDB (Julian Date)
+                    jdtdb = float(jdtdb_str)
+                    
+                    # Extract X, Y, Z using regex
+                    x_match = re.search(r'X\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
+                    y_match = re.search(r'Y\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
+                    z_match = re.search(r'Z\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
+                    
+                    if not all([x_match, y_match, z_match]):
+                        print(f"Could not find X, Y, Z in block {i}")
+                        continue
+                    
+                    x = float(x_match.group(1))
+                    y = float(y_match.group(1))
+                    z = float(z_match.group(1))
+                    
+                    # Extract VX, VY, VZ using regex
+                    vx_match = re.search(r'VX\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
+                    vy_match = re.search(r'VY\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
+                    vz_match = re.search(r'VZ\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
+                    
+                    if not all([vx_match, vy_match, vz_match]):
+                        print(f"Could not find VX, VY, VZ in block {i}")
+                        continue
+                    
+                    vx = float(vx_match.group(1))
+                    vy = float(vy_match.group(1))
+                    vz = float(vz_match.group(1))
+                    
+                    # Extract LT, RG, RR using regex
+                    lt_match = re.search(r'LT\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
+                    rg_match = re.search(r'RG\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
+                    rr_match = re.search(r'RR\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
+                    
+                    if not all([lt_match, rg_match, rr_match]):
+                        print(f"Could not find LT, RG, RR in block {i}")
+                        continue
+                    
+                    lt = float(lt_match.group(1))
+                    rg = float(rg_match.group(1))
+                    rr = float(rr_match.group(1))
+                    
+                    # Convert JDTDB to datetime
+                    dt = self.jdtdb_to_datetime(jdtdb)
+                    
+                    # Add row to data
+                    data_rows.append({
+                        'JDTDB': jdtdb,
+                        'datetime': dt,
+                        'X': x,
+                        'Y': y,
+                        'Z': z,
+                        'VX': vx,
+                        'VY': vy,
+                        'VZ': vz,
+                        'LT': lt,
+                        'RG': rg,
+                        'RR': rr
+                    })
+                    
+                    # Print progress
+                    if i % 50 == 0:
+                        print(f"Processed {i} entries")
+                    
+                except Exception as e:
+                    print(f"Error parsing block {i}: {str(e)}")
+                    # Continue to next block
+            
+            # Create DataFrame
+            if not data_rows:
+                print(f"No data rows were parsed for object {object_id}")
+                return None
+            
+            df = pd.DataFrame(data_rows)
+            print(f"\nSuccessfully parsed {len(data_rows)} data points for {object_id}")
+            
+            # Get object name
+            obj_name = self.get_object_name(object_id)
+            print(f"\nObject ID {object_id} is {obj_name}\n")
+            print(f"\nObject ID {object_id} df contents: {df}\n")
+            
+            # Add metadata columns
+            df['object_id'] = object_id
+            df['object_name'] = obj_name
+            df['reference_frame'] = 'Ecliptic of J2000.0'
+            
+            # Save to Parquet file
+            filename = f"ephemeris_{obj_name}_{DEFAULT_START_TIME.replace('-', '')}_{DEFAULT_STOP_TIME.replace('-', '')}.parquet"
+            output_path = Path(__file__).parent / "Horizons_archive" / filename
+            
+            # Ensure directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Save DataFrame to Parquet
+            df.to_parquet(
+                output_path,
+                index=False,
+                compression='gzip',
+                engine='pyarrow'
+            )
+            
+            print(f"Successfully saved ephemeris data for {object_id} to {output_path}")
+            print(f"DataFrame contains {len(df)} rows with columns: {df.columns.tolist()}")
+            
+            return output_path
+            
+        except Exception as e:
+            print(f"Error processing ephemeris data for {object_id}: {str(e)}")
+            traceback.print_exc()
+            return None
 
-    def preprocess_ephemeris(self, data: str, object_id: str) -> Optional[Path]:
+    def preprocess_ephemeris_test(self, data: str, object_id: str) -> Optional[Path]:
         """
         Processes raw ephemeris data from JPL Horizons API and saves it as a Parquet file.
         
@@ -127,6 +316,7 @@ class HorizonsApiClient:
             for line in raw_data.split('\n'):
                 # Split the line into components (e.g., "X = value")
                 parts = [x.strip() for x in line.split()]
+                print(f"\nLine: {line} and parts {parts}")
                 
                 # Skip lines that don't contain valid numeric values
                 if not parts or any(not x.replace('.', '', 1).isdigit() for x in parts):
@@ -146,9 +336,62 @@ class HorizonsApiClient:
                 'RG',         # Range (km)
                 'RR'          # Range rate (km/s)
             ]
+
+            # Parse data rows
+            data_rows = []
+            for line in raw_data:
+                parts = [x.strip() for x in line.split()]
+                
+                if not parts or any(not x.replace('.', '', 1).isdigit() for x in parts):
+                    continue
+                    
+                jdtdb = float(parts[0])
+                position = list(map(float, parts[1:4]))
+                velocity = list(map(float, parts[4:7]))
+                lt = float(parts[7])
+                rg = float(parts[8])
+                rr = float(parts[9])
+
+                # Calculate additional columns if needed
+                ra, dec = self.cartesian_to_equatorial(position)
+                #uncertainty_ra = np.nan  # Placeholder for uncertainty in RA (to be determined)
+                #uncertainty_dec = np.nan  # Placeholder for uncertainty in Dec (to be determined)
+                #azimuth = np.nan           # For observer-based ephemeris
+                #elevation = np.nan         # For observer-based ephemeris
+                #distance = rg              # Use range as distance
+                
+                data_rows.append({
+                    'time': self.jdtdb_to_datetime(jdtdb),
+                    #'object_id': object_id,
+                    #'ra': ra,
+                    #'dec': dec,
+                    #'azimuth': azimuth,
+                    #'elevation': elevation,
+                    'x': position[0],
+                    'y': position[1],
+                    'z': position[2],
+                    'vx': velocity[0],
+                    'vy': velocity[1],
+                    'vz': velocity[2],
+                    'lt': lt,
+                    'rg': rg,
+                    'rr': rr
+                    #'uncertainty_ra': uncertainty_ra,
+                    #'uncertainty_dec': uncertainty_dec,
+                    #'source': 'JPL Horizons API'
+                })
+                
+            # Create DataFrame with the desired schema
+            #df = pd.DataFrame(data_rows)
+
+
                     
             # Create DataFrame from parsed data
+            print(f"\nPre-dataframe data_rows: {data_rows}")
             df = pd.DataFrame(data_rows, columns=headers)
+            obj_name = self.get_object_name(object_id)
+            print(f"\nObject ID {object_id} is {obj_name}\n")
+            print(f"\nPre-parquet dataframe for {obj_name}: {df}")
             
             # Set data types for Parquet compatibility
             #df = self.set_parquet_data_types(df)
@@ -163,7 +406,7 @@ class HorizonsApiClient:
             }'''
             
             # Save to Parquet file with the specified naming convention
-            filename = f"horizons_ephemeris_{object_id}_{DEFAULT_START_TIME.replace('-', '')}_{DEFAULT_STOP_TIME.replace('-', '')}.parquet"
+            filename = f"ephemeris_{obj_name}_{DEFAULT_START_TIME.replace('-', '')}_{DEFAULT_STOP_TIME.replace('-', '')}.parquet"
             output_path = Path(__file__).parent / "Horizons_archive" / filename
             
             df.to_parquet(
@@ -174,6 +417,8 @@ class HorizonsApiClient:
             )
             
             print(f"Successfully saved ephemeris data for {object_id} to {output_path}")
+            dataf = pd.read_parquet(output_path)
+            print(f"\n Dataframe: {dataf}")
             return output_path
             
         except Exception as e:
@@ -512,7 +757,7 @@ class HorizonsApiClient:
             '726': 'Mab(UXXVI=2003U1)',
             '727': 'Cupid(UXXVII=2003U2)',
             '75051': '2023U1',
-            '799': 'Uranus', #non-sexual
+            '799': 'Uranus', # non-sexual
             '801': 'Triton(NI)',
             '802': 'Nereid(NII)',
             '803': 'Naiad(NIII)',
@@ -612,9 +857,11 @@ class HorizonsApiClient:
 def main():
     # List of objects to fetch (example list)
     objects_to_fetch = [
+        "301",      # Moon
         #"399",     # Earth
+        #"401",     # Phobos
         "502",     # Europa
-        #"401",     # Moon
+        #"503"      # Ganymede
         #"2000001", # Ceres
         #"2000002", # Pallas
         #"2000003", # Vesta
@@ -634,9 +881,11 @@ def main():
     for obj in objects_to_fetch:
         print(f"\nFetching ephemeris_data for {obj}: ")
         result = client.fetch_ephemeris(object_id=obj)
-        print(f"\n Payload: {result}")
+        #print(f"\n Payload: {result}")
         if result is None:
-            print("Failed to fetch ephemeris data for object:", obj)
+            #print(f"\n Analyzing data for object: {obj}")
+            #client.analyze_parquet_file(result)
+            #print("Failed to fetch ephemeris data for object:", obj)
             continue
             
         '''df = client.preprocess_ephemeris(result, object_id=obj)
