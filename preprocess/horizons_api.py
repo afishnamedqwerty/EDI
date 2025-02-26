@@ -93,6 +93,9 @@ class HorizonsApiClient:
         #    24: Uncertainty in Azimuth (arcminutes).
         #    29: Uncertainty in Elevation (arcminutes).
 
+        quantities = [1,2,4,5,9]
+        n = "1"
+
         obs_params = {
             "format": FORMAT,
             "COMMAND": cmd,
@@ -106,40 +109,9 @@ class HorizonsApiClient:
             "ANG_FORMAT": "DEG",
             "EXTRA_PREC": "YES",
             #"CSV_FORMAT": "YES"
-            #"QUANTITIES": "1,2,5"   # RA, DEC, delta, deldot
+            "QUANTITIES": "1"   # RA, DEC, delta, deldot
         }
 
-        # Example QUANTITIES for ELEMENTS Type
-        # The QUANTITIES parameter can be set to a comma-separated list of integers representing the desired orbital elements. For example:
-
-        # 1: RA of ascending node (Ω) in degrees.
-        # 2: Inclination (i) in degrees.
-        # 3: Eccentricity (e).
-        # 4: Argument of perihelion (ω) in degrees.
-        # 5: Mean anomaly (M0) in degrees.
-        # 6: Semi-major axis (a) in AU.
-        # 7: Longitude of ascending node (Ω) rate in arcseconds/year.
-        # 8: Inclination rate in arcseconds/year.
-        # 9: Eccentricity rate in dimensionless units.
-        # 10: Argument of perihelion rate in arcseconds/year.
-        # 11: Mean anomaly rate in degrees/year.
-
-        elem_params = {
-            "format": FORMAT,
-            "COMMAND": cmd,
-            "OBJECT_DATA": "YES",
-            "MAKE_EPHEM": "YES",
-            "EPHEM_TYPE": "ELEMENTS",  # Vector ephemeris
-            "CENTER": "0@399",      # Earth-centered
-            "START_TIME": start_time,
-            "STOP_TIME": stop_time,
-            "STEP_SIZE": step_size,
-            "ANG_FORMAT": "DEG",
-            "EXTRA_PREC": "YES",
-            #"CSV_FORMAT": "YES"
-            #"QUANTITIES": "1,2,3,4,5,6,7,8,9,10,11"   # RA, DEC, delta, deldot
-        }
-        
         try:
             response = requests.get(API_URL, params=obs_params)
             if response.status_code == 200:
@@ -151,7 +123,7 @@ class HorizonsApiClient:
                     raise ValueError(f"API Error: {data['error']}")
                     
                 return data'''
-                print(f"{object_id} output: {response.text}")
+                #print(f"{object_id} output: {response.text}")
                 return output_path
                 
             else:
@@ -197,7 +169,7 @@ class HorizonsApiClient:
             "STOP_TIME": stop_time,
             "STEP_SIZE": step_size,
             #"CSV_FORMAT": "YES"
-            #"QUANTITIES": "1,2,3,4"   # RA, DEC, delta, deldot
+            "QUANTITIES": "1"   # RA, DEC, delta, deldot
         }
 
         # Example QUANTITIES for ELEMENTS Type
@@ -252,7 +224,7 @@ class HorizonsApiClient:
         except Exception as e:
             print(f"Error fetching ephemeris data for object {object_id}: {str(e)}")
             return None
-        # Preprocesses vec_params ephemeris data into dataframe parquet file
+        
     def preprocess_ephemeris_obs(self, data: str, object_id: str) -> Optional[Path]:
         """
         Processes raw ephemeris data from JPL Horizons API and saves it as a Parquet file.
@@ -265,7 +237,138 @@ class HorizonsApiClient:
             Path: Path to the saved Parquet file if successful. None otherwise.
         """
         try:
+            # Find the positions of $$SOE and $$EOE markers
+            soe_start = data.find("$$SOE")
+            eoe_end = data.find("$$EOE") #+ 7  # Add 5 to include the marker in the slice
             
+            if soe_start == -1 or eoe_end == -1:
+                print(f"No SOE or EOE markers found for object {object_id}")
+                return None
+                
+            # Extract the data section between $$SOE and $$EOE
+            raw_data = data[soe_start+7:eoe_end].strip()
+            
+            if not raw_data:
+                print(f"Empty data section for object {object_id}")
+                return None
+                
+            # Print raw data information for debugging
+            print(f"Raw data length: {len(raw_data)}")
+            print(f"First 200 chars: {raw_data[:200]}")
+            
+            # Approach: Use regex to find each data point directly
+            
+            # Define regex pattern to match the date-time, RA, and DEC values
+            obs_pattern = re.compile(
+                r'^\s*(\d{4}-[A-Za-z]{3}-\d{2}\s+\d{2}:\d{2})'  # Date-Time
+                r'\s+(-?\d+\.\d+[Ee]?[-+]?\d*)'                  # RA
+                r'\s+(-?\d+\.\d+[Ee]?[-+]?\d*)'                  # DEC'
+            )
+
+            obs_pat = r"^\s*(\d{4}-[A-Za-z]{3}-\d{2}\s+\d{2}:\d{2})"
+
+            
+            # Find all matches in the raw data
+            #obs_matches = obs_pattern.findall(raw_data)
+            obs_matches = re.finditer(obs_pat, raw_data)
+            obs_positions = [(m.start(), m.group(1)) for m in obs_matches]
+            
+            if not obs_positions:
+                print("No observation data found in the section")
+                return None
+
+            print(f"Found {len(obs_positions)} JDTDB entries")
+            
+            if len(obs_positions) == 0:
+                print("No JDTDB values found in data")
+                return None
+            
+            # Initialize list to store parsed data
+            data_rows = []
+            
+            for i, (pos, obs_str) in enumerate(obs_positions): #obs_matches
+                try:
+
+                    # Determine the end position of this block (start of next block or end of data)
+                    end_pos = obs_positions[i+1][0] if i < len(obs_positions)-1 else len(raw_data)
+                    
+                    # Extract the entire data block for this time point
+                    block = raw_data[pos:end_pos]
+                    
+                    # Parse JDTDB (Julian Date)
+                    dt_str = float(obs_str)
+                    
+                    # Extract ra and dec using regex
+                    ra_match = re.search(r'\s+(-?\d+\.\d+[Ee]?[-+]?\d*)', block)
+                    dec_match = re.search(r'\s+(-?\d+\.\d+[Ee]?[-+]?\d*)', block)
+                    
+                    if not all([ra_match, dec_match]):
+                        print(f"Could not find X, Y, Z in block {i}")
+                        continue
+                    
+                    ra = float(ra_match.group(1))
+                    dec = float(dec_match.group(1))
+                    # Parse datetime string
+                    dt = datetime.strptime(dt_str.strip(), "%Y-%b-%d %H:%M")
+                    
+                    # Convert RA and DEC to float
+                    #ra = float(ra_str.strip())
+                    #dec = float(dec_str.strip())
+                    
+                    # Add row to data_rows
+                    data_rows.append({
+                        'datetime': dt,
+                        'RA': ra,
+                        'DEC': dec
+                    })
+                    
+                    # Print progress every 50 successful parses
+                    if i % 50 == 0:
+                        print(f"Processed {i} entries")
+                        
+                except ValueError as e:
+                    print(f"Error parsing entry {i}: '{dt_str}' - Error: {str(e)}")
+                    continue
+            
+            if not data_rows:
+                print(f"No data rows were parsed for object {object_id}")
+                return None
+                
+            # Create DataFrame from parsed data
+            df = pd.DataFrame(data_rows)
+            print(f"Successfully created DataFrame with {len(df)} rows")
+            
+            # Get object name
+            obj_name = self.get_object_name(object_id)
+            print(f"Object ID {object_id} is {obj_name}")
+            
+            # Add metadata columns
+            df['object_id'] = object_id
+            df['object_name'] = obj_name
+            df['reference_frame'] = 'ICRF'
+            
+            # Save DataFrame to Parquet file
+            output_path = self._save_to_parquet(df, object_id, "ephemeris")
+            
+            return output_path
+            
+        except Exception as e:
+            print(f"Error processing data for object {object_id}: {str(e)}")
+            return None
+        
+        # Preprocesses vec_params ephemeris data into dataframe parquet file
+    def preprocess_ephemeris_obs_test(self, data: str, object_id: str) -> Optional[Path]:
+        """
+        Processes raw ephemeris data from JPL Horizons API and saves it as a Parquet file.
+        
+        Args:
+            data (str): Raw response string from the Horizons API
+            object_id (str): ID of the target object
+            
+        Returns:
+            Path: Path to the saved Parquet file if successful. None otherwise.
+        """
+        try:
             # Find the positions of $$SOE and $$EOE markers
             soe_start = data.find("$$SOE")
             eoe_end = data.find("$$EOE")
@@ -274,154 +377,160 @@ class HorizonsApiClient:
                 print(f"No SOE or EOE markers found for object {object_id}")
                 return None
                 
-            # Extract the data section between $$SOE and $$EOE
+            # Extract the data section between $$SOE and $$EOE and clean it
             raw_data = data[soe_start+5:eoe_end].strip()
             
             if not raw_data:
                 print(f"Empty data section for object {object_id}")
                 return None
             
+            # Normalize line endings and split into lines
+            normalized_data = raw_data.replace('\r\n', '\n').replace('\r', '\n')
+            lines = [line.strip() for line in normalized_data.split('\n') if line.strip()]
+            
             # Print raw data information for debugging
             print(f"Raw data length: {len(raw_data)}")
-            print(f"First 200 chars: {raw_data[:200]}")
+            print(f"First 200 raw_chars: {raw_data[:200]}")
+            print(f"First 200 lines_chars: {lines[:200]}")
             
-            # Approach: Use regex to find each data point directly
-            
-            # Find all JDTDB entries
-            jdtdb_pattern = r"(\d+\.\d+)\s*=\s*A\.D\."
-            jdtdb_matches = re.finditer(jdtdb_pattern, raw_data)
-            
-            # Store positions of each match to determine data blocks
-            jdtdb_positions = [(m.start(), m.group(1)) for m in jdtdb_matches]
-            
-            print(f"Found {len(jdtdb_positions)} JDTDB entries")
-            
-            if len(jdtdb_positions) == 0:
-                print("No JDTDB values found in data")
-                return None
+            # Split into lines using splitlines() to handle different line endings
+            # and filter out empty lines
+            #lines = [line.strip() for line in raw_data.splitlines() if line.strip()]
+            #lines = raw_data.split('\n')
+            print(f"Found {len(lines)} data lines to process")
             
             # Initialize list to store parsed data
+            headers = []
             data_rows = []
-            # Define the headers by concatenating all header lines
-            headers = [
-                "Date__UT__HR:MN", "R.A.__ICRF___DEC", "R.A._a-appar__DEC.", 
-                "dRA*cosD", "d(DEC)/dt", "Azi_a-app__Elev", "dAZ*cosE", 
-                "d(ELV)/dt", "X_sat-primary_Y", "SatPANG", "L_Ap_Sid_Time", 
-                "a-mass", "mag_ex", "APmag", "S-brt", "Illu%", "Def_illu", 
-                "ang-sep/v", "Ang-diam", "ObsSub-LON", "ObsSub-LAT", 
-                "SunSub-LON", "SunSub-LAT", "SN.ang", "SN.dist", "NP.ang", 
-                "NP.dist", "hEcl-Lon", "hEcl-Lat", "r", "rdot", "delta", 
-                "deldot", "1-way_down_LT", "VmagSn", "VmagOb", "S-O-T/r", 
-                "S-T-O", "T-O-M/MN_Illu%", "O-P-T", "PsAng", "PsAMV", 
-                "PlAng", "Cnst", "TDB-UT", "ObsEcLon", "ObsEcLat", 
-                "N.Pole-RA", "N.Pole-DC", "GlxLon", "GlxLat", "L_Ap_SOL_Time", 
-                "399_ins_LT", "RA_3sigma", "DEC_3sigma", "SMAA_3sig", 
-                "SMIA_3sig", "Theta", "Area_3sig", "POS_3sigma", "RNG_3sigma", 
-                "RNGRT_3sigma", "DOP_S_3sig", "DOP_X_3sig", "RT_delay_3sig", 
-                "Tru_Anom", "L_Ap_Hour_Ang", "phi", "PAB-LON", "PAB-LAT", 
-                "App_Lon_Sun", "RA_ICRF-a-app__DEC", "I_dRA*cosD", "I_d(DEC)/dt", 
-                "Sky_motion", "Sky_mot_PA", "RelVel-ANG", "Lun_Sky_Brt", 
-                "sky_SNR", "UT1-UTC"
-            ]
+
+            # Updated regex pattern to handle leading whitespace and capture datetime, RA, DEC
+            pattern = re.compile(r'^\s*(\d{4}-[A-Za-z]{3}-\d{2})\s+(\d{2}:\d{2})\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)')
             
-            # Process each data block
-            for i, (pos, jdtdb_str) in enumerate(jdtdb_positions):
+            for i, line in enumerate(lines): #(enumerate(lines, 1))
                 try:
-                    # Determine the end position of this block (start of next block or end of data)
-                    end_pos = jdtdb_positions[i+1][0] if i < len(jdtdb_positions)-1 else len(raw_data)
+                    # Print the raw line for debugging
+                    print(f"\nProcessing line {i+1}: '{line}'")
+                    # Split the line by whitespace and filter out empty strings
+                    #parts = [p for p in line.split() if p]
+                    print(f"\nlineeeeeee: {line}\n\n")
+
+                    match = pattern.match(line.strip())
+                    print(f"match: {match}")
                     
-                    # Extract the entire data block for this time point
-                    block = raw_data[pos:end_pos]
-                    
-                    # Parse JDTDB (Julian Date)
-                    jdtdb = float(jdtdb_str)
-                    
-                    # Extract X, Y, Z using regex
-                    x_match = re.search(r'X\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
-                    y_match = re.search(r'Y\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
-                    z_match = re.search(r'Z\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
-                    
-                    if not all([x_match, y_match, z_match]):
-                        print(f"Could not find X, Y, Z in block {i}")
-                        continue
-                    
-                    x = float(x_match.group(1))
-                    y = float(y_match.group(1))
-                    z = float(z_match.group(1))
-                    
-                    # Extract VX, VY, VZ using regex
-                    vx_match = re.search(r'VX\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
-                    vy_match = re.search(r'VY\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
-                    vz_match = re.search(r'VZ\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
-                    
-                    if not all([vx_match, vy_match, vz_match]):
-                        print(f"Could not find VX, VY, VZ in block {i}")
-                        continue
-                    
-                    vx = float(vx_match.group(1))
-                    vy = float(vy_match.group(1))
-                    vz = float(vz_match.group(1))
-                    
-                    # Extract LT, RG, RR using regex
-                    lt_match = re.search(r'LT\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
-                    rg_match = re.search(r'RG\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
-                    rr_match = re.search(r'RR\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
-                    
-                    if not all([lt_match, rg_match, rr_match]):
-                        print(f"Could not find LT, RG, RR in block {i}")
-                        continue
-                    
-                    lt = float(lt_match.group(1))
-                    rg = float(rg_match.group(1))
-                    rr = float(rr_match.group(1))
-                    
-                    # Convert JDTDB to datetime
-                    dt = self.jdtdb_to_datetime(jdtdb)
-                    
-                    # Add row to data
-                    data_rows.append({
-                        'JDTDB': jdtdb,
-                        'datetime': dt,
-                        'X': x,
-                        'Y': y,
-                        'Z': z,
-                        'VX': vx,
-                        'VY': vy,
-                        'VZ': vz,
-                        'LT': lt,
-                        'RG': rg,
-                        'RR': rr
-                    })
-                    
-                    # Print progress
-                    if i % 50 == 0:
-                        print(f"Processed {i} entries")
-                    
+                    if match:
+                        date_str, time_str, ra_str, dec_str = match.groups()
+                            
+                        # Parse datetime
+                        try:
+                            dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%b-%d %H:%M")
+                        except ValueError as e:
+                            print(f"Error parsing datetime from line: {line}: {e}")
+                            continue
+
+                        # Convert RA and Dec to floats
+                        try:
+                            ra = float(ra_str)
+                            dec = float(dec_str)
+                        except ValueError as e:
+                            print(f"Error converting RA/Dec from line: {line}: {e}")
+                            continue
+                            
+                        data_rows.append({
+                            "datetime": dt,
+                            "ra": ra,
+                            "dec": dec
+                        })
                 except Exception as e:
-                    print(f"Error parsing block {i}: {str(e)}")
-                    # Continue to next block
+                    print(f"Error parsing line {i+1}: '{line}' - Error: {str(e)}")
+                    continue
+
+                    
+
+                    
+                    #if len(parts) < 4:  # Need at least date, time, RA, DEC
+                    #    print(f"Line {i} doesn't have enough parts: '{line}'")
+                    #    continue
+                    
+                    # Extract and clean components
+                    #date_str = parts[0].strip()
+                    #time_str = parts[1].strip()
+                    #ra_str = parts[2].strip()
+                    #dec_str = parts[3].strip()
+                    
+                    # Combine date and time
+                    #datetime_str = f"{date_str} {time_str}"
+                    '''datetime_str = match.group(1).strip()
+                    ra_str = match.group(2).strip()
+                    dec_str = match.group(3).strip()
+                    
+                    # Parse datetime
+                    try:
+                        dt = datetime.strptime(datetime_str, '%Y-%b-%d %H:%M')
+                        dt = pytz.UTC.localize(dt)
+                    except ValueError as e:
+                        print(f"Error parsing datetime in line {i}: '{datetime_str}'")
+                        print(f"Error: {str(e)}")
+                        continue
+                    
+                    # Parse RA and DEC
+                    try:
+                        ra = float(ra_str)
+                        dec = float(dec_str)
+                    except ValueError as e:
+                        print(f"Error parsing coordinates in line {i}: RA='{ra_str}', DEC='{dec_str}'")
+                        print(f"Error: {str(e)}")
+                        continue
+                    
+                    # Add data row
+                    data_rows.append({
+                        'datetime': dt,
+                        'RA_ICRF': ra,
+                        'DEC_ICRF': dec
+                    })
+                    success_count += 1
+
+                    # Parse datetime string
+                    dt = datetime.strptime(datetime_str, '%Y-%b-%d %H:%M')
+                    dt = pytz.UTC.localize(dt)
+                    
+                    # Convert RA and DEC to float
+                    ra = float(ra_str)
+                    dec = float(dec_str)
+                    
+                    # Add data row
+                    data_rows.append({
+                        'datetime': dt,
+                        'RA_ICRF': ra,
+                        'DEC_ICRF': dec
+                    })
+                    success_count += 1'''
             
-            # Create DataFrame
+            # Create DataFrame from parsed data
             if not data_rows:
                 print(f"No data rows were parsed for object {object_id}")
                 return None
             
             df = pd.DataFrame(data_rows)
-            print(f"\nSuccessfully parsed {len(data_rows)} data points for {object_id}")
+            print(f"Successfully created DataFrame with {len(data_rows)} rows")
             
             # Get object name
             obj_name = self.get_object_name(object_id)
-            print(f"\nObject ID {object_id} is {obj_name}\n")
+            print(f"Object ID {object_id} is {obj_name}")
             
             # Add metadata columns
             df['object_id'] = object_id
             df['object_name'] = obj_name
-            df['reference_frame'] = 'Ecliptic of J2000.0'
-
-            print(f"\nObject ID {object_id} df contents: {df}\n")
+            df['reference_frame'] = 'ICRF'
+            
+            # Sort by datetime
+            df = df.sort_values('datetime')
+            
+            print(f"DataFrame shape: {df.shape}")
+            print("First few rows:")
+            print(df.head())
             
             # Save to Parquet file
-            filename = f"ephemeris_{obj_name}_{DEFAULT_START_TIME.replace('-', '')}_{DEFAULT_STOP_TIME.replace('-', '')}.parquet"
+            filename = f"ephemeris_obs_{obj_name}_{DEFAULT_START_TIME.replace('-', '')}_{DEFAULT_STOP_TIME.replace('-', '')}.parquet"
             output_path = Path(__file__).parent / "Horizons_archive" / filename
             
             # Ensure directory exists
@@ -435,7 +544,7 @@ class HorizonsApiClient:
                 engine='pyarrow'
             )
             
-            print(f"Successfully saved ephemeris data for {object_id} to {output_path}")
+            print(f"Successfully saved ephemeris data to {output_path}")
             print(f"DataFrame contains {len(df)} rows with columns: {df.columns.tolist()}")
             
             return output_path
@@ -593,7 +702,7 @@ class HorizonsApiClient:
             print(f"\nObject ID {object_id} df contents: {df}\n")
             
             # Save to Parquet file
-            filename = f"ephemeris_{obj_name}_{DEFAULT_START_TIME.replace('-', '')}_{DEFAULT_STOP_TIME.replace('-', '')}.parquet"
+            filename = f"ephemeris_vec_{obj_name}_{DEFAULT_START_TIME.replace('-', '')}_{DEFAULT_STOP_TIME.replace('-', '')}.parquet"
             output_path = Path(__file__).parent / "Horizons_archive" / filename
             
             # Ensure directory exists
@@ -1197,10 +1306,10 @@ def main():
     # List of objects to fetch (example list)
     objects_to_fetch = [
         "301",      # Moon
-        #"399",     # Earth
-        #"401",     # Phobos
+        "399",     # Earth
+        "401",     # Phobos
         "502",     # Europa
-        #"503"      # Ganymede
+        "503"      # Ganymede
         #"2000001", # Ceres
         #"2000002", # Pallas
         #"2000003", # Vesta
@@ -1219,8 +1328,8 @@ def main():
 
     for obj in objects_to_fetch:
         print(f"\nFetching ephemeris_data for {obj}: ")
-        result = client.fetch_ephemeris_obs(object_id=obj)
-        #result = client.fetch_ephemeris_vec(object_id=obj)
+        #result = client.fetch_ephemeris_obs(object_id=obj)
+        result = client.fetch_ephemeris_vec(object_id=obj)
         #print(f"\n Payload: {result}")
         if result is None:
             #print(f"\n Analyzing data for object: {obj}")
