@@ -116,7 +116,7 @@ class HorizonsApiClient:
             response = requests.get(API_URL, params=obs_params)
             if response.status_code == 200:
                 #data = json.loads(response.text)
-                output_path = self.preprocess_ephemeris_obs(response.text, object_id)
+                output_path = self.preprocess_ephemeris_mb_obs(response.text, object_id)
                 
                 # Check for specific errors in the API response
                 '''if "error" in data:
@@ -164,7 +164,7 @@ class HorizonsApiClient:
             "COMMAND": cmd,
             "MAKE_EPHEM": "YES",
             "EPHEM_TYPE": "VECTORS",  # Vector ephemeris
-            "CENTER": "500@399",      # Earth-centered
+            "CENTER": "500@399",      # Earth-centered, 5500@0 (Solar-system barycenter) however it could be beneficial to re-generate all vector parquets from different centers
             "START_TIME": start_time,
             "STOP_TIME": stop_time,
             "STEP_SIZE": step_size,
@@ -225,8 +225,8 @@ class HorizonsApiClient:
             print(f"Error fetching ephemeris data for object {object_id}: {str(e)}")
             return None
 
-    # Preprocesses obs_params ephemeris data into dataframe parquet file       
-    def preprocess_ephemeris_obs(self, data: str, object_id: str) -> Optional[Path]:
+    # Preprocesses obs_params ephemeris data into dataframe parquet file (obs might actually not be necessary)       
+    def preprocess_ephemeris_mb_obs(self, data: str, object_id: str) -> Optional[Path]:
         """
         Processes raw ephemeris data from JPL Horizons API and saves it as a Parquet file.
         
@@ -237,8 +237,126 @@ class HorizonsApiClient:
         Returns:
             Path: Path to the saved Parquet file if successful. None otherwise.
         """
+        
+        # Define regex patterns for each parameter
+        # Got Mean radius working for all ephemeral_obs requests - broke everything else. In the regex trenches and i hate it
+        patterns = {
+            'Mean Radius (km)': [
+                r'Vol\. mean radius, km\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 1
+                r'Mean radius \(km\)\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)',  # Variation 2
+                r'(?i)vol\. mean radius\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 3
+                r'(?i)Vol\. Mean Radius\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.?\d*)\s*\+-?\s*(\d+\.?\d*)',  # Variation 4
+                r'(?i)Vol\. Mean Radius \(km\)\s*=\s*(\d+)\s*\+\-\s*(\d+)',  # Variation 5
+                r'(?i)vol\. mean radius\s*,\s*km\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)'  # Variation 6
+                #r'(?i)mean radius\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)'  # Variation 7
+            ],
+            'GM (km³/s²)': [
+                r'GM\s*,?\s*\s*\(km\^3/s\^2\)\s*\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)', # Variation 1
+                r'GM\,\s*\(km\^3/s\^2\)\s*\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)',
+                r'GM\,\s*km^3/s^2\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',
+                #r'(?i)GM\s*\(km\^3/s\^2\)\s*=\s*(\d+\.\d+)\s*\+-',
+                r'(?i)(?:gm)\s*(?:\(|\s)km^3/s^2(?:\)|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',
+                r'(?i)GM\,\s*?km\^3/s\^2?\s*=\s*(\d+\.\d+(?:\+|-)\d+\.\d+)',
+                r'(?i)GM\,\s*km^3/s^2\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',
+                r'(?i)GM\,\s*km^3/s^2\s*=\s*((?:\d+\.\d+)(?:\+-?\d+\.\d+)?)',
+                r'(?i)([GM,|GM])\s*km^3/s^2\s*=\s*(\d+\.\d+)(?:\+-?\s*)(\d+\.\d+)?'
+
+
+            ],
+            'Density (g/cm³)': r'(?i)density\s*(?:,?\s*)?(?:$|\s)g/cm^3(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',
+            'Eccentricity': r'(?i)eccentricity\s*=\s*(\d+\.\d+)',
+            'Inclination (deg)': r'(?i)inclination\s*=\s*(\d+\.\d+) deg',
+            'Orbital Period (days)': r'(?i)orbital period\s*=\s*(\d+\.\d+) d'
+        }
+
+        params = {}
+        for param, pattern_list in patterns.items():
+            if param == 'Mean Radius (km)':
+                # Try each pattern until a match is found
+                for pattern in pattern_list:
+                    match = re.search(pattern, data, flags=re.IGNORECASE)
+                    #print(f"\nParam: {param}")
+                    #print(f"Pattern: {pattern}")
+                    if match:
+                        value = match.group(1).strip()
+                        uncertainty = match.group(2).strip() if match.group(2) else None
+                        params[param] = value
+                        if uncertainty is not None:
+                            params[f'{param} Uncertainty'] = uncertainty
+                        print(f"Match: {param} {value}")
+                        if uncertainty:
+                            print(f" ± {uncertainty}")
+                        break  # Exit the loop once a match is found
+            elif param == 'GM (km³/s²)':
+                # Try each pattern until a match is found
+                for pattern in pattern_list:
+                    match = re.search(pattern, data, flags=re.IGNORECASE)
+                    print(f"\nParam: {param}")
+                    print(f"Pattern: {pattern}")
+                    if match:
+                        value = match.group(1).strip()
+                        uncertainty = match.group(2).strip() if match.group(2) else None
+                        params[param] = value
+                        if uncertainty is not None:
+                            params[f'{param} Uncertainty'] = uncertainty
+                        print(f"Match: {param} {value}")
+                        if uncertainty:
+                            print(f" ± {uncertainty}")
+                        break  # Exit the loop once a match is found
+            else:
+                match = re.search(pattern_list, data)
+                if match:
+                    if param in ['Density (g/cm³)']:
+                        value = match.group(1).strip()
+                        uncertainty = match.group(2).strip() if match.group(2) else None
+                        params[param] = value
+                        if uncertainty is not None:
+                            params[f'{param} Uncertainty'] = uncertainty
+                    else:
+                        value = match.group(1).strip()
+                        params[param] = value
+                    print(f"Match: {value}")
+        
+
+
+        # Define the list of required headers for the DataFrame
+        headers = [
+            'Mean Radius (km)',
+            'Mean Radius (km) Uncertainty',
+            'GM (km³/s²)',
+            'GM (km³/s²) Uncertainty',
+            'Density (g/cm³)',
+            'Density (g/cm³) Uncertainty',
+            'Eccentricity',
+            'Inclination (deg)',
+            'Orbital Period (days)'
+        ]
+
+        # Initialize a dictionary to hold the standardized data
+        std_data = {}
+
+        for header in headers:
+            if f"{header}" in params:
+                std_data[header] = params[f"{header}"]
+            else:
+                continue
+
+        # Create the standardized DataFrame with each header as a column
+        daf = pd.DataFrame([std_data], columns=headers)
+
+        # Create DataFrame with extracted parameters
+        '''daf = pd.DataFrame({
+            'Parameter': list(params.keys()),
+            'Value': list(params.values())
+        })'''
+
+        # Print the DataFrame
+        print(f"\nMajor body info:\n{daf}")
+
+
         try:
             # Find the positions of $$SOE and $$EOE markers
+            #print(f"\nRAW: {data}")
             soe_start = data.find("$$SOE")
             eoe_end = data.find("$$EOE") #+ 7  # Add 5 to include the marker in the slice
             
@@ -254,9 +372,9 @@ class HorizonsApiClient:
                 return None
                 
             # Print raw data information for debugging
-            print(f"Raw data length: {len(raw_data)}")
-            print(f"First 200 chars: {raw_data[:200]}")
-            
+            #print(f"Raw data length: {len(raw_data)}")
+            #print(f"First 200 chars: {raw_data[:200]}")
+
             # Approach: Use regex to find each data point directly
             
             # Define regex pattern to match the date-time, RA, and DEC values
@@ -278,58 +396,74 @@ class HorizonsApiClient:
                 print("No observation data found in the section")
                 return None
 
-            print(f"Found {len(obs_positions)} JDTDB entries")
+            #print(f"Found {len(obs_positions)} JDTDB entries")
             
             if len(obs_positions) == 0:
                 print("No JDTDB values found in data")
                 return None
             
+            # Split into lines and filter out empty lines
+            lines = [line.strip() for line in raw_data.split('\\n') if line.strip()]
+            #print(f"{lines}")
+            #print(f"Found {len(lines)} data lines to process")
+            
             # Initialize list to store parsed data
             data_rows = []
+            success_count = 0
             
-            for i, (pos, obs_str) in enumerate(obs_positions): #obs_matches
+            # Process each line
+            for i, line in enumerate(lines, 1):
                 try:
-
-                    # Determine the end position of this block (start of next block or end of data)
-                    end_pos = obs_positions[i+1][0] if i < len(obs_positions)-1 else len(raw_data)
+                    # Extract datetime, RA, and DEC using regex
+                    #print(f"Lineee: {line}")
+                    match = re.match(
+                        r'^\s*(\d{4}-[A-Za-z]{3}-\d{2}\s+\d{2}:\d{2})\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)',
+                        line
+                    )
                     
-                    # Extract the entire data block for this time point
-                    block = raw_data[pos:end_pos]
+                    if not match:
+                        print(f"Line {i} doesn't match expected pattern: '{line}'")
+                        continue
+                        
+                    dt_str, ra_str, dec_str = match.groups()
+                    #print(f"Line: {dt_str}, {ra_str}, {dec_str}")
                     
-                    # Parse JDTDB (Julian Date)
-                    dt_str = float(obs_str)
-                    
-                    # Extract ra and dec using regex
-                    ra_match = re.search(r'\s+(-?\d+\.\d+[Ee]?[-+]?\d*)', block)
-                    dec_match = re.search(r'\s+(-?\d+\.\d+[Ee]?[-+]?\d*)', block)
-                    
-                    if not all([ra_match, dec_match]):
-                        print(f"Could not find X, Y, Z in block {i}")
+                    # Parse datetime
+                    try:
+                        dt = datetime.strptime(dt_str.strip(), '%Y-%b-%d %H:%M')
+                        dt = pytz.UTC.localize(dt)
+                    except ValueError as e:
+                        print(f"Error parsing datetime in line {i}: '{dt_str}'")
+                        print(f"Error: {str(e)}")
                         continue
                     
-                    ra = float(ra_match.group(1))
-                    dec = float(dec_match.group(1))
-                    # Parse datetime string
-                    dt = datetime.strptime(dt_str.strip(), "%Y-%b-%d %H:%M")
+                    # Parse RA and DEC
+                    try:
+                        ra = float(ra_str)
+                        dec = float(dec_str)
+                    except ValueError as e:
+                        print(f"Error parsing coordinates in line {i}: RA='{ra_str}', DEC='{dec_str}'")
+                        print(f"Error: {str(e)}")
+                        continue
                     
-                    # Convert RA and DEC to float
-                    #ra = float(ra_str.strip())
-                    #dec = float(dec_str.strip())
-                    
-                    # Add row to data_rows
+                    # Add data row
                     data_rows.append({
                         'datetime': dt,
-                        'RA': ra,
-                        'DEC': dec
+                        'RA_ICRF': ra,
+                        'DEC_ICRF': dec
                     })
+                    success_count += 1
                     
                     # Print progress every 50 successful parses
-                    if i % 50 == 0:
-                        print(f"Processed {i} entries")
+                    if success_count % 50 == 0:
+                        print(f"Successfully parsed {success_count} lines")
                         
-                except ValueError as e:
-                    print(f"Error parsing entry {i}: '{dt_str}' - Error: {str(e)}")
+                except Exception as e:
+                    print(f"Error processing line {i}: '{line}'")
+                    print(f"Exception: {str(e)}")
                     continue
+            
+            print(f"Successfully parsed {success_count} lines out of {len(lines)}")
             
             if not data_rows:
                 print(f"No data rows were parsed for object {object_id}")
@@ -338,23 +472,42 @@ class HorizonsApiClient:
             # Create DataFrame from parsed data
             df = pd.DataFrame(data_rows)
             print(f"Successfully created DataFrame with {len(df)} rows")
+            #print(f"{object_id} Dataframe: {df}")
             
             # Get object name
             obj_name = self.get_object_name(object_id)
-            print(f"Object ID {object_id} is {obj_name}")
+            #print(f"Object ID {object_id} is {obj_name}")
             
             # Add metadata columns
             df['object_id'] = object_id
             df['object_name'] = obj_name
             df['reference_frame'] = 'ICRF'
+
+            #print(f"\nObject ID {object_id} df contents: {df}\n")
             
-            # Save DataFrame to Parquet file
-            output_path = self._save_to_parquet(df, object_id, "ephemeris")
+            # Save to Parquet file
+            filename = f"ephemeris_obs_{obj_name}_{DEFAULT_START_TIME.replace('-', '')}_{DEFAULT_STOP_TIME.replace('-', '')}.parquet"
+            output_path = Path(__file__).parent / "Horizons_archive" / filename
+            
+            # Ensure directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Save DataFrame to Parquet
+            df.to_parquet(
+                output_path,
+                index=False,
+                compression='gzip',
+                engine='pyarrow'
+            )
+            
+            print(f"Successfully saved ephemeris data for {object_id} to {output_path}")
+            print(f"DataFrame contains {len(df)} rows with columns: {df.columns.tolist()}")
             
             return output_path
             
         except Exception as e:
             print(f"Error processing data for object {object_id}: {str(e)}")
+            traceback.print_exc()
             return None
 
     # Preprocesses vec_params ephemeris data into dataframe parquet file
@@ -960,11 +1113,19 @@ class HorizonsApiClient:
 def main():
     # List of objects to fetch (example list)
     objects_to_fetch = [
+        #"199",
+        "299",
         "301",      # Moon
         #"399",     # Earth
         #"401",     # Phobos
+        "499",
         "502",     # Europa
         #"503"      # Ganymede
+        #"599",
+        #"699",
+        #"799",
+        #"899",
+        #"999"
         #"2000001", # Ceres
         #"2000002", # Pallas
         #"2000003", # Vesta
@@ -983,8 +1144,8 @@ def main():
 
     for obj in objects_to_fetch:
         print(f"\nFetching ephemeris_data for {obj}: ")
-        #result = client.fetch_ephemeris_obs(object_id=obj)
-        result = client.fetch_ephemeris_vec(object_id=obj)
+        result = client.fetch_ephemeris_obs(object_id=obj)
+        #result = client.fetch_ephemeris_vec(object_id=obj)
         #print(f"\n Payload: {result}")
         if result is None:
             #print(f"\n Analyzing data for object: {obj}")

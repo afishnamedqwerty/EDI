@@ -10,8 +10,7 @@ from scipy.interpolate import interp1d
 from typing import Dict, List, Optional
 from modules.MuonOptimizer import MuonOptimizer
 # Constants
-HDF5_FILE_SUFFIX = ".h5"
-DEFAULT_HDF5_DIR = "preprocessed_data"
+DEFAULT_DATA_DIR = "preprocess"
 BATCH_SIZE = 64
 NUM_WORKERS = 4
 PIN_MEMORY = True
@@ -240,6 +239,7 @@ class TransformerTimeSeriesModel(pl.LightningModule):
         """
         optimizer = MuonOptimizer(self.parameters(), lr=0.001, mu=0.99)
         return optimizer
+    
 
 def main():
     """
@@ -253,9 +253,9 @@ def main():
     
     # Create data module with all training and validation paths
     train_data_paths = [
-        os.path.join(DEFAULT_HDF5_DIR, "pds_spice.h5"),
-        os.path.join(DEFAULT_HDF5_DIR, "era5.h5"),
-        os.path.join(DEFAULT_HDF5_DIR, "jpl_horizons.h5")
+        os.path.join(DEFAULT_DATA_DIR, "pds_spice.parquet"),
+        os.path.join(DEFAULT_DATA_DIR, "era5.parquet"),
+        os.path.join(DEFAULT_DATA_DIR, "jpl_horizons.parquet")
     ]
     
     data_module = TimeSeriesDataModule(train_data_paths=train_data_paths)
