@@ -239,7 +239,6 @@ class HorizonsApiClient:
         """
         
         # Define regex patterns for each parameter
-        # Got Mean radius working for all ephemeral_obs requests - broke everything else. In the regex trenches and i hate it
         patterns = {
             'Mean Radius (km)': [
                 r'Vol\. mean radius, km\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 1
@@ -263,7 +262,9 @@ class HorizonsApiClient:
 
 
             ],
-            'Density (g/cm³)': r'(?i)density\s*(?:,?\s*)?(?:$|\s)g/cm^3(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',
+            'Density (g/cm³)': [
+                r'(?i)density\s*(?:,?\s*)?(?:$|\s)g/cm^3(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',
+            ],
             'Eccentricity': r'(?i)eccentricity\s*=\s*(\d+\.\d+)',
             'Inclination (deg)': r'(?i)inclination\s*=\s*(\d+\.\d+) deg',
             'Orbital Period (days)': r'(?i)orbital period\s*=\s*(\d+\.\d+) d'
@@ -303,18 +304,28 @@ class HorizonsApiClient:
                         if uncertainty:
                             print(f" ± {uncertainty}")
                         break  # Exit the loop once a match is found
-            else:
-                match = re.search(pattern_list, data)
-                if match:
-                    if param in ['Density (g/cm³)']:
+            elif param == 'Density (g/cm³)':
+                # Try each pattern until a match is found
+                for pattern in pattern_list:
+                    match = re.search(pattern, data, flags=re.IGNORECASE)
+                    print(f"\nParam: {param}")
+                    print(f"Pattern: {pattern}")
+                    if match:
                         value = match.group(1).strip()
                         uncertainty = match.group(2).strip() if match.group(2) else None
                         params[param] = value
                         if uncertainty is not None:
                             params[f'{param} Uncertainty'] = uncertainty
-                    else:
-                        value = match.group(1).strip()
-                        params[param] = value
+                        print(f"Match: {param} {value}")
+                        if uncertainty:
+                            print(f" ± {uncertainty}")
+                        break  # Exit the loop once a match is found
+            else:
+                match = re.search(pattern_list, data)
+                if match:
+                    
+                    value = match.group(1).strip()
+                    params[param] = value
                     print(f"Match: {value}")
         
 
