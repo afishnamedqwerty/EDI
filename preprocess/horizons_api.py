@@ -7,6 +7,7 @@ import csv
 import base64
 import requests
 import pandas as pd
+import math
 import numpy as np
 #import timezone
 import traceback
@@ -116,7 +117,7 @@ class HorizonsApiClient:
             response = requests.get(API_URL, params=obs_params)
             if response.status_code == 200:
                 #data = json.loads(response.text)
-                output_path = self.preprocess_ephemeris_mb_obs(response.text, object_id)
+                output_path = self.preprocess_ephemeris_obs(response.text, object_id)
                 
                 # Check for specific errors in the API response
                 '''if "error" in data:
@@ -226,7 +227,7 @@ class HorizonsApiClient:
             return None
 
     # Preprocesses obs_params ephemeris data into dataframe parquet file (obs might actually not be necessary)       
-    def preprocess_ephemeris_mb_obs(self, data: str, object_id: str) -> Optional[Path]:
+    def preprocess_ephemeris_obs(self, data: str, object_id: str) -> Optional[Path]:
         """
         Processes raw ephemeris data from JPL Horizons API and saves it as a Parquet file.
         
@@ -239,6 +240,50 @@ class HorizonsApiClient:
         """
         
         # Define regex patterns for each parameter
+        # still need to append daf on the end of the obs_dataframe
+        # Then merge the obs_dataframe with the vec_dataframe using datetime as leading standardized parameter
+        # 199 (Mercury) GM uncertainty incorrectly captured don't forget
+        # don't forget density g/cm^-3 conversion to g/cm^3 (including density uncertainties)
+        # Mean Radius (+ Uncertainty), GM (still failing empty GM 1-sigma values), Eccentricity complete
+        # Inclination still an issue (only available for small bodies through Horizons API)
+        gm_uncertainty_patterns = [
+            r'GM 1\-sigma\s*,?\s*\s*\(km\^3/s\^2\)\s*\s*=\s*\s*\+-\s*(\d+\.\d+)', # Variation 1
+            r'GM 1\-sigma\,\s*?\s*\s*km\^3/s\^2\s*\s*=\s*\s*\+-\s*(\d+\.\d+)',
+            r'GM 1\-sigma\s*\(\s*km^3/s^2\)\s*=\s*\+-\s*(\d+\.\d+)', #(?= ) # Variation 2
+            r'GM 1\-sigma\s*\(\s*km^3/s^2\)\s*=\s*\s*\+-(\d+\.\d+)(?= )', # Variation 3
+            r'GM 1\-sigma\s*,?\s*\(\s*km^3/s^2\)\s*=\s*(\d+\.\d+)', # Variation 4
+            #r'GM 1\-sigma\s*,?\s*km^3/s^2\s*=\s*\+-(\d+\.\d+)',
+            #r'GM 1\-sigma,\s*?km\^3/s\^2\s*=\s*\+-\s*(\d+\.\d+)',  # With uncertainty
+            #r'(?i)GM 1-sigma\,\s*km^3/s^2\s*=\s*(?:\+-?\d+\.\d+)',
+            #r'(?i)([GM,|GM])\s*km^3/s^2\s*=\s*(\d+\.\d+)(?:\+-?\s*)(\d+\.\d+)?', # Variation\
+            r'(?i)\bGM\s+1\-sigma\b\s*$\w+$\s*=\s*(?:\+\-)?\s*(\d+(?:\.\d+)?)',
+            r'(?i)GM\s+1\-sigma.*?\=\s*(?:\+\-)?\s*([0-9.]+)(?=\s*(?:\n|\S+\s+=|$))',
+            #r'(?i)GM\s+1\-sigma.*?\=\s*(\d+(?:\.\d+)?)'
+            #r'(?i)GM\s+1\-sigma.*?\=\s*([+-]?\d+(?:\.\d+)?)',
+            r'(?i)GM\s+1\-sigma\s*=\s*([+-]?\d+(?:\.\d+)?)',
+            r'(?i)GM\s+1\-sigma.*?\=\s*(?:\+\-)?\s*(\d+(?:\.\d+)?)', # Variation main
+            #r'(?i)GM\s+1\-sigma.*?\=\s*[+-]?\s*(\d+(?:\.\d+)?)\b'
+            #r'(?i)\bGM\s+1\-sigma\b\s*$(?:km^3/s^2)$\s*=\s*(\d+(?:\.\d+)?)',
+
+        ]
+
+        orb_period_patterns = [
+            r'(?i)orbital period\s*=\s*(\d+\.\d+) d',
+            #r'orbital period.*?\s+(\d+\.\d+)',
+            r'(?i)Sidereal orbital period\s*=\s*(\d+\.\d+) d',
+            r'(?i)\bsidereal\s+orb\.\s+per\,\s+y\s*=\s*(\d+\.\d+)',
+            r'(?i)\bsidereal\s+orb\.\s+per\.=\s*(\d+\.\d+)\s*y',
+            r'(?i)\bmean\s+sidereal\s+orb\s+per\s*=\s*(\d+\.\d+(?:[eE]\d+)?)\s*y',
+            r'(?i)\bSidereal orb\. per\.\s*=\s*(\d+\.\d+)\s*y?\b',
+            r'(?i)\bsidereal orb\. per\.\,\s+y =\s*(\d+\.\d+)?\b',
+            r'(?i)\bSidereal orbit period\s*=\s*(\d+\.\d+)\s*y?\b'
+        ]
+
+        aph_peri_list = [
+            r'Perihelion.*?\s+(\d+\.\d+)\s+(\d+\.\d+)'
+
+        ]
+        
         patterns = {
             'Mean Radius (km)': [
                 r'Vol\. mean radius, km\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 1
@@ -251,9 +296,13 @@ class HorizonsApiClient:
             ],
             'GM (km³/s²)': [
                 r'GM\s*,?\s*\s*\(km\^3/s\^2\)\s*\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)', # Variation 1
-                r'GM\,\s*\(km\^3/s\^2\)\s*\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)',
+                r'GM\s*\(\s*km^3/s^2\)\s*=\s*(\d+\.\d+[\+-].*?)', #(?= ) # Variation 2
+                r'GM\s*$\s*km^3/s^2$\s*=\s*(\d+\.\d+[\+-].*?)(?= )', # Variation 3
+                r'GM\s*\(km\^3/s\^2\)\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)',  # With uncertainty
+                r'GM\s*\(km\^3/s\^2\)\s*=\s*(\d+(?:\.\d+)?)\s*(?:\+-\s*(\d+(?:\.\d+)?))?', # Optional uncertainty
+                r'GM\s*,?\s*\(\s*km^3/s^2\)\s*=\s*(\d+\.\d+)',
+                r'GM\,\s*km\^3/s\^2\s*=\s*((\d+\.\d+)(?: \+- (\d+\.\d+))?)',
                 r'GM\,\s*km^3/s^2\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',
-                #r'(?i)GM\s*\(km\^3/s\^2\)\s*=\s*(\d+\.\d+)\s*\+-',
                 r'(?i)(?:gm)\s*(?:\(|\s)km^3/s^2(?:\)|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',
                 r'(?i)GM\,\s*?km\^3/s\^2?\s*=\s*(\d+\.\d+(?:\+|-)\d+\.\d+)',
                 r'(?i)GM\,\s*km^3/s^2\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',
@@ -264,10 +313,27 @@ class HorizonsApiClient:
             ],
             'Density (g/cm³)': [
                 r'(?i)density\s*(?:,?\s*)?(?:$|\s)g/cm^3(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',
+                r'density \(g\/cm\^3\)\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 1
+                r'density \(g\/cm\^3\)\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)',  # Variation 2
+                r'(?i)density\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 3
+                r'(?i)density\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.?\d*)\s*\+-?\s*(\d+\.?\d*)',  # Variation 4
+                r'(?i)density \(km\)\s*=\s*(\d+)\s*\+\-\s*(\d+)',  # Variation 5
+                r'(?i)density\s*,\s*km\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)'
             ],
-            'Eccentricity': r'(?i)eccentricity\s*=\s*(\d+\.\d+)',
-            'Inclination (deg)': r'(?i)inclination\s*=\s*(\d+\.\d+) deg',
-            'Orbital Period (days)': r'(?i)orbital period\s*=\s*(\d+\.\d+) d'
+            'Eccentricity': [
+                r'(?i)eccentricity\s*=\s*(\d+\.\d+)',
+                r'Eccentricity, e\s+~\s+(\d+)'
+            ],
+            'Inclination (deg)': [
+                r'(?i)inclination\s*=\s*(\d+\.\d+) deg',
+            ],
+            'Semi-Major Axis': [
+                r'(?i)Semi-major axis,\s+a\s*=\s*(\d+\.\d+)',
+                r'(?i)Semi-major axis,\s+a\s+~\s(\d+\.\d+)',
+                r'(?i)\bSemi-major axis,\s+a\s*=\s*(\d{1,3},?\d{3}(\.\d+)?)',
+                r'(?i)\bSemi-major axis,\s+a\s*=\s*(\d+\.\d+$\d+\^\d+$)',
+                r'(?i)\bSemi-major axis,\s+a\s*[=~]\s*(\d+\,\d+(\.\d+)?)'
+            ],
         }
 
         params = {}
@@ -292,15 +358,26 @@ class HorizonsApiClient:
                 # Try each pattern until a match is found
                 for pattern in pattern_list:
                     match = re.search(pattern, data, flags=re.IGNORECASE)
-                    print(f"\nParam: {param}")
-                    print(f"Pattern: {pattern}")
+                    #print(f"\nParam: {param}")
+                    #print(f"Pattern: {pattern}")
                     if match:
                         value = match.group(1).strip()
                         uncertainty = match.group(2).strip() if match.group(2) else None
                         params[param] = value
-                        if uncertainty is not None:
+                        if uncertainty is not None and value != uncertainty:
                             params[f'{param} Uncertainty'] = uncertainty
                         print(f"Match: {param} {value}")
+                    elif uncertainty is None:
+                        for pat in gm_uncertainty_patterns:
+                            umatch = re.search(pat, data, flags=re.IGNORECASE)
+                            #print(f"\nPat Param: {param}")
+                            #print(f"Pattern: {pat}")
+                            if umatch:
+                                print(f"umatch: {umatch}")
+                                uncertainty = umatch.group(1).strip()
+                                params[f'{param} Uncertainty'] = uncertainty
+                                break
+                                
                         if uncertainty:
                             print(f" ± {uncertainty}")
                         break  # Exit the loop once a match is found
@@ -308,8 +385,8 @@ class HorizonsApiClient:
                 # Try each pattern until a match is found
                 for pattern in pattern_list:
                     match = re.search(pattern, data, flags=re.IGNORECASE)
-                    print(f"\nParam: {param}")
-                    print(f"Pattern: {pattern}")
+                    #print(f"\nParam: {param}")
+                    #print(f"Pattern: {pattern}")
                     if match:
                         value = match.group(1).strip()
                         uncertainty = match.group(2).strip() if match.group(2) else None
@@ -320,12 +397,77 @@ class HorizonsApiClient:
                         if uncertainty:
                             print(f" ± {uncertainty}")
                         break  # Exit the loop once a match is found
+            elif param == 'Eccentricity':
+                # Try each pattern until a match is found
+                value = None
+                for pattern in pattern_list:
+                    match = re.search(pattern, data, flags=re.IGNORECASE)
+                    #print(f"\nParam: {param}")
+                    #print(f"Pattern: {pattern}")
+                    if match:
+                        value = match.group(1).strip()
+                        params[param] = value
+                        #print(f"Match: {param} {value}")
+                        break  # Exit the loop once a match is found
+                if value is None:
+                    for pat in aph_peri_list:
+                        match = re.search(pat, data, flags=re.IGNORECASE)
+                        #print(f"Peri Pattern: {pat}")
+                        if match:
+                            #print(f"peri_match: {umatch}")
+                            aphelion = float(match.group(1).strip())
+                            perihelion = float(match.group(2).strip())
+                            #print(f"aph: {aphelion} and peri: {perihelion}")
+                            value = self.calculate_eccentricity(perihelion, aphelion)
+                            params[param] = value
+                            #print(f"Eccen Match: {param} {value}")
+                
+            elif param == 'Inclination (deg)':
+                # Try each pattern until a match is found
+                for pattern in pattern_list:
+                    match = re.search(pattern, data, flags=re.IGNORECASE)
+                    #print(f"\nParam: {param}")
+                    #print(f"Pattern: {pattern}")
+                    if match:
+                        value = match.group(1).strip()
+                        params[param] = value
+                        print(f"Match: {param} {value}")
+                        break  # Exit the loop once a match is found
+            elif param == 'Semi-Major Axis':
+                # Try each pattern until a match is found
+                value = None
+                for pattern in pattern_list:
+                    match = re.search(pattern, data, flags=re.IGNORECASE)
+                    print(f"Semi major pat: {pattern}")
+                    if match:
+                        print(f"Semi match: {match}")
+                        value = float(match.group(1).strip())
+                        params[param] = value
+                        print(f"Match: {param} {value}")
+                        break  # Exit the loop once a match is found
+                
+                # If no direct semi-major axis match, try orbital period patterns
+                if value is None:
+                    for pattern in orb_period_patterns:
+                        match = re.search(pattern, data, flags=re.IGNORECASE)
+                        print(f"Orb period pattern: {pattern}")
+                        if match:
+                            orbital_period = float(match.group(1).strip())
+                            print(f"Orb period value = {orbital_period}")
+                            # Convert orbital period (days) to years
+                            orbital_period_years = orbital_period / 365.25
+                            value = str(self.calculate_semi_major_axis(orbital_period_years))
+                            params[param] = value
+                            print(f"Match: {param} {value} (calculated from orbital period)")
+                            break
+
             else:
                 match = re.search(pattern_list, data)
                 if match:
                     
                     value = match.group(1).strip()
                     params[param] = value
+                    print(f"Else Param: {param}")
                     print(f"Match: {value}")
         
 
@@ -340,7 +482,7 @@ class HorizonsApiClient:
             'Density (g/cm³) Uncertainty',
             'Eccentricity',
             'Inclination (deg)',
-            'Orbital Period (days)'
+            'Semi-Major Axis'
         ]
 
         # Initialize a dictionary to hold the standardized data
@@ -710,6 +852,54 @@ class HorizonsApiClient:
         dec = np.arcsin(z / np.hypot(x, y))
         
         return ra * 180 / np.pi, dec * 180 / np.pi
+    
+    def calculate_semi_major_axis(self, orbital_period_years):
+        """
+        Calculate the semi-major axis of a planet's orbit using Kepler's Third Law.
+        
+        Args:
+            orbital_period_years (float): Orbital period in years.
+            
+        Returns:
+            float: Semi-major axis in kilometers.
+        """
+        # Gravitational constant [m^3 kg^-1 s^-2]
+        G = 6.67430e-11
+        # Mass of the Sun [kg]
+        M_sun = 1.9885e30
+        # Convert orbital period from years to seconds
+        seconds_per_year = 365.25 * 24 * 3600
+        T = orbital_period_years * seconds_per_year
+        
+        # Calculate a^3 using Kepler's Third Law
+        a_cubed = (G * M_sun * T**2) / (4 * math.pi**2)
+        
+        # Take the cube root to find a in meters, then convert to kilometers
+        a_meters = a_cubed ** (1/3)
+        a_kilometers = a_meters / 1000
+        
+        return a_kilometers
+    
+    def calculate_eccentricity(self, perihelion, aphelion):
+        """
+        Calculate the orbital eccentricity given the perihelion and aphelion distances.
+        
+        Parameters:
+            perihelion (float): The distance of perihelion in astronomical units (AU).
+            aphelion (float): The distance of aphelion in astronomical units (AU).
+            
+        Returns:
+            float: The orbital eccentricity.
+            
+        Raises:
+            ValueError: If either perihelion or aphelion is non-positive.
+        """
+        if perihelion <= 0 or aphelion <= 0:
+            raise ValueError("Perihelion and Aphelion distances must be positive numbers.")
+        
+        e = (aphelion - perihelion) / (aphelion + perihelion)
+        return e
+
     
     def set_parquet_data_types(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -1124,18 +1314,18 @@ class HorizonsApiClient:
 def main():
     # List of objects to fetch (example list)
     objects_to_fetch = [
-        #"199",
+        "199",
         "299",
         "301",      # Moon
         #"399",     # Earth
         #"401",     # Phobos
         "499",
         "502",     # Europa
-        #"503"      # Ganymede
-        #"599",
-        #"699",
-        #"799",
-        #"899",
+        "503",      # Ganymede
+        "599",
+        "699",
+        "799",
+        "899",
         #"999"
         #"2000001", # Ceres
         #"2000002", # Pallas

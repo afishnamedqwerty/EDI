@@ -21,6 +21,7 @@ Hybrid Approach: Combine interpolation for coarse-grained gaps and attention mec
 Implementation:
 Preprocess the data with an interpolation method before feeding it into the model.
 Use a modified Transformer architecture that includes masked attention to handle missing values gracefully.
+
 2. Model Configuration
 Continuous Tokenization
 Use Case: Orbital vectors are continuous and high-dimensional (e.g., 6 dimensions for position and velocity).
@@ -46,6 +47,7 @@ Use beam search or sampling techniques to generate diverse predictions.
 Implementation:
 Modify the forward pass to accept multiple conditioning windows.
 Visualize the generated trajectories using tools like matplotlib or plotly.
+
 3. Training Loop
 Pre-Training
 Use Case: Learning general patterns from diverse orbital data (e.g., planets, asteroids, satellites).

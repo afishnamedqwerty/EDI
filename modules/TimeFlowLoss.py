@@ -56,3 +56,36 @@ class TimeFlowLoss(nn.Module):
         loss = -torch.mean(torch.sum(log_prob, dim=1))
         
         return loss
+    
+
+    # Define regex patterns for each parameter
+        patterns = {
+            'Mean Radius (km)': r'Mean radius \(km\)\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)',
+            'GM (km³/s²)': r'GM\s*\(km\^3/s\^2\)\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)',
+            'Density (g/cm³)': r'Density\s*\(g\s*cm\^-3\)\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)',
+            'Eccentricity': r'Eccentricity,\s*e\s*~\s*(\d+\.\d+)',
+            'Inclination (deg)': r'Inclination,\s*i\s*\(deg\)\s*~\s*(\d+\.\d+)',
+            'Orbital Period (days)': r'Orbital period\s*~\s*(\d+\.\d+)\s*d',
+            'Rotational Period': r'Rotational period\s*=\s*(\w+)'
+        }
+
+        # Extract parameters using regex
+        params = {}
+        for param, pattern in patterns.items():
+            match = re.search(pattern, data)
+            print(f"\nParam: {param}")
+            print(f"Pattern: {pattern}")
+            
+            if match:
+                if param in ['Mean Radius (km)', 'GM (km³/s²)', 'Density (g/cm³)']:
+                    value = match.group(1).strip()
+                    uncertainty = match.group(2).strip()
+                    params[param] = value
+                    params[f'{param} Uncertainty'] = uncertainty
+                    print(f"Match: {value} ± {uncertainty}")
+                else:
+                    value = match.group(1).strip()
+                    params[param] = value
+                    print(f"Match: {value}")
+            else:
+                print("No match")
