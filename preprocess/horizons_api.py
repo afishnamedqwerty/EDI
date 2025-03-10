@@ -456,7 +456,7 @@ class HorizonsApiClient:
                             print(f"Orb period value = {orbital_period}")
                             # Convert orbital period (days) to years
                             orbital_period_years = orbital_period / 365.25
-                            value = str(self.calculate_semi_major_axis(orbital_period_years))
+                            value = float(self.calculate_semi_major_axis(orbital_period_years))
                             params[param] = value
                             print(f"Match: {param} {value} (calculated from orbital period)")
                             break
