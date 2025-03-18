@@ -3,7 +3,7 @@ import glob
 from pathlib import Path
 import pyarrow.parquet as pq
 from sklearn.preprocessing import RobustScaler, StandardScaler
-from sklearn.cca import CanonicalCorrelationAnalysis
+#from sklearn import CanonicalCorrelationAnalysis
 
 # Constants
 ARCHIVE_DIR = Path(__file__).parent / "Horizons_archive"
@@ -80,10 +80,10 @@ def merge_eph_vec_parquet_files():
             # Apply CCA on selected feature groups
             features1 = ['X', 'Y', 'Z']
             features2 = ['VX', 'VY', 'VZ']
-            cca_df = apply_cca(df_normalized, features1, features2)
+            #cca_df = apply_cca(df_normalized, features1, features2)
 
             # Merge normalized and CCA-transformed data
-            df_processed = pd.concat([df_normalized, cca_df], axis=1)
+            #df_processed = pd.concat([df_normalized, cca_df], axis=1)
             dfs.append(df) #df_processed
             
         merged_df = pd.concat(dfs, axis=0, keys=[file.name for file in files])
