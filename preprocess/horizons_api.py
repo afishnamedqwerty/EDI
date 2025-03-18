@@ -56,7 +56,7 @@ class HorizonsApiClient:
     
         # Append NOFRAG and CAP flags for small bodies (e.g., asteroids, comets)
         if "P" in object_id or "-" in object_id:
-            cmd += ";NOFRAG;CAP"
+            cmd += ";NOFRAG;" #CAP;"
         
         # Specific Quantities (https://ssd.jpl.nasa.gov/horizons/manual.html#obsquan)
         # 1. Astrometric RA & DEC
@@ -110,7 +110,7 @@ class HorizonsApiClient:
             "ANG_FORMAT": "DEG",
             "EXTRA_PREC": "YES",
             #"CSV_FORMAT": "YES"
-            "QUANTITIES": "1"   # RA, DEC, delta, deldot
+            "QUANTITIES": "1" #1   # RA, DEC, delta, deldot
         }
 
         try:
@@ -165,43 +165,12 @@ class HorizonsApiClient:
             "COMMAND": cmd,
             "MAKE_EPHEM": "YES",
             "EPHEM_TYPE": "VECTORS",  # Vector ephemeris
-            "CENTER": "500@399",      # Earth-centered, 5500@0 (Solar-system barycenter) however it could be beneficial to re-generate all vector parquets from different centers
+            "CENTER": "@10",      # Earth-centered 500@399, @10 5500@0 (Solar-system barycenter) however it could be beneficial to re-generate all vector parquets from different centers
             "START_TIME": start_time,
             "STOP_TIME": stop_time,
             "STEP_SIZE": step_size,
             #"CSV_FORMAT": "YES"
-            "QUANTITIES": "1"   # RA, DEC, delta, deldot
-        }
-
-        # Example QUANTITIES for ELEMENTS Type
-        # The QUANTITIES parameter can be set to a comma-separated list of integers representing the desired orbital elements. For example:
-
-        # 1: RA of ascending node (Ω) in degrees.
-        # 2: Inclination (i) in degrees.
-        # 3: Eccentricity (e).
-        # 4: Argument of perihelion (ω) in degrees.
-        # 5: Mean anomaly (M0) in degrees.
-        # 6: Semi-major axis (a) in AU.
-        # 7: Longitude of ascending node (Ω) rate in arcseconds/year.
-        # 8: Inclination rate in arcseconds/year.
-        # 9: Eccentricity rate in dimensionless units.
-        # 10: Argument of perihelion rate in arcseconds/year.
-        # 11: Mean anomaly rate in degrees/year.
-        
-        elem_params = {
-            "format": FORMAT,
-            "COMMAND": cmd,
-            "OBJECT_DATA": "YES",
-            "MAKE_EPHEM": "YES",
-            "EPHEM_TYPE": "ELEMENTS",  # Vector ephemeris
-            "CENTER": "0@399",      # Earth-centered
-            "START_TIME": start_time,
-            "STOP_TIME": stop_time,
-            "STEP_SIZE": step_size,
-            "ANG_FORMAT": "DEG",
-            "EXTRA_PREC": "YES",
-            #"CSV_FORMAT": "YES"
-            "QUANTITIES": "1,2,3,4,5,6,7,8,9,10,11"   # RA, DEC, delta, deldot
+            #"QUANTITIES": "EC"   # RA, DEC, delta, deldot
         }
         
         try:
@@ -225,27 +194,21 @@ class HorizonsApiClient:
         except Exception as e:
             print(f"Error fetching ephemeris data for object {object_id}: {str(e)}")
             return None
+        
+    def preprocess_phys_data(self, data:str):
 
-    # Preprocesses obs_params ephemeris data into dataframe parquet file (obs might actually not be necessary)       
-    def preprocess_ephemeris_obs(self, data: str, object_id: str) -> Optional[Path]:
-        """
-        Processes raw ephemeris data from JPL Horizons API and saves it as a Parquet file.
-        
-        Args:
-            data (str): Raw response string from the Horizons API
-            object_id (str): ID of the target object
-            
-        Returns:
-            Path: Path to the saved Parquet file if successful. None otherwise.
-        """
-        
+
         # Define regex patterns for each parameter
+        # Total solar system mass is like 98% sun and 1.8% jupiter, potential value in prioritizing those centers and weighting them?
         # still need to append daf on the end of the obs_dataframe
         # Then merge the obs_dataframe with the vec_dataframe using datetime as leading standardized parameter
         # 199 (Mercury) GM uncertainty incorrectly captured don't forget
         # don't forget density g/cm^-3 conversion to g/cm^3 (including density uncertainties)
         # Mean Radius (+ Uncertainty), GM (still failing empty GM 1-sigma values), Eccentricity complete
         # Inclination still an issue (only available for small bodies through Horizons API)
+
+
+
         gm_uncertainty_patterns = [
             r'GM 1\-sigma\s*,?\s*\s*\(km\^3/s\^2\)\s*\s*=\s*\s*\+-\s*(\d+\.\d+)', # Variation 1
             r'GM 1\-sigma\,\s*?\s*\s*km\^3/s\^2\s*\s*=\s*\s*\+-\s*(\d+\.\d+)',
@@ -276,15 +239,297 @@ class HorizonsApiClient:
             r'(?i)\bmean\s+sidereal\s+orb\s+per\s*=\s*(\d+\.\d+(?:[eE]\d+)?)\s*y',
             r'(?i)\bSidereal orb\. per\.\s*=\s*(\d+\.\d+)\s*y?\b',
             r'(?i)\bsidereal orb\. per\.\,\s+y =\s*(\d+\.\d+)?\b',
-            r'(?i)\bSidereal orbit period\s*=\s*(\d+\.\d+)\s*y?\b'
+            r'(?i)\bSidereal orbit period\s*=\s*(\d+\.\d+)\s*yr?\b',
+            r'(?i)\bSidereal orbit period\s*=\s*(\d+\.\d+)\s*y?\b',
+            r'(?i)orbital period,\s+~\s(\d+\.\d+)'
         ]
 
         aph_peri_list = [
-            r'Perihelion.*?\s+(\d+\.\d+)\s+(\d+\.\d+)'
+            #r'Perihelion.*?\s+(\d+\.\d+)\s+(\d+\.\d+)'
+            r'.*Solar Constant \(W/m\^2\)\s+(\d+)\s+(\d+)'
 
+        ]
+
+        density_negative_patterns = [
+            r'Density \(g cm\^\-3\)\s*\s*=\s*(\d+.\d+)',
         ]
         
         patterns = {
+            'Mass (kg)': [
+                r'(?i)^.*x10\^(\d+).*=(\d+\.\d+)',
+                r'Mass x10\^(\d+) \(kg\)\s*=\s*(\d+.\d+)',
+                r'Mass, x10\^(\d+) kg\s*=\s*(\d+.\d+)',
+                r'Mass x 10\^(\d+) \(kg\)\s*\s*=\s*(\d+.\d+)',
+                #r'(?i)^.*x10\^(\d+).*=\s*(\d+\.?\d*([eE][+-]?\d+)?)'
+            ],
+            'Mean Radius (km)': [
+                r'Vol\. mean radius, km\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 1
+                r'Mean radius \(km\)\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)',  # Variation 2
+                r'(?i)vol\. mean radius\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 3
+                r'(?i)Vol\. Mean Radius\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.?\d*)\s*\+-?\s*(\d+\.?\d*)',  # Variation 4
+                r'(?i)Vol\. Mean Radius \(km\)\s*=\s*(\d+)\s*\+\-\s*(\d+)',  # Variation 5
+                r'(?i)vol\. mean radius\s*,\s*km\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)'  # Variation 6
+                #r'(?i)mean radius\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)'  # Variation 7
+            ],
+            'Density (g/cm³)': [
+                r'density \(g\/cm\^3\)\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 1
+                r'density \(g\/cm\^3\)\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)',  # Variation 2
+                #r'(?i)density\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 3
+                #r'(?i)density\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.?\d*)\s*\+-?\s*(\d+\.?\d*)',  # Variation 4
+                r'Density \(g\/cm\^3\)\s*\s*=\s*(\d+.\d+)',  # Variation 5
+                r'Density \(R=1195 km\)\s*\s*=\s*(\d+.\d+)',
+                r'(?i)density\s*,\s*km\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)'
+            ],
+            'Semi-Major Axis': [
+                r'(?i)Semi-major axis,\s+a\s*=\s*(\d+\.\d+)',
+                r'(?i)Semi-major axis,\s+a\s+~\s(\d+\.\d+)',
+                r'(?i)\bSemi-major axis,\s+a\s*=\s*(\d{1,3},?\d{3}(\.\d+)?)',
+                r'(?i)\bSemi-major axis,\s+a\s*=\s*(\d+\.\d+$\d+\^\d+$)',
+                r'(?i)\bSemi-major axis,\s+a\s*[=~]\s*(\d+\,\d+(\.\d+)?)'
+            ],
+        }
+
+        params = {}
+        mass_v = float('inf')
+        m_radius = float('inf')
+        m_radius_u = float('inf')
+        density_v = float('inf')
+        sm_axis = float('inf')
+        for param, pattern_list in patterns.items():
+            if param == 'Mass (kg)':
+                # Try each pattern until a match is found
+                for pattern in pattern_list:
+                    match = re.search(pattern, data, flags=re.IGNORECASE)
+                    #print(f"\nParam: {param}")
+                    #print(f"Pattern: {pattern}")
+                    if match:
+                        exp = int(match.group(1).strip())
+                        value = float(match.group(2).strip())
+
+                        scaling_factor = 10 ** (exp - 24)
+
+                        # Standardize the mass
+                        std_mass = value * scaling_factor
+                        #std_mass_rounded = round(std_mass, 2)
+                        params[param] = std_mass
+                        mass_v = std_mass
+                        #if uncertainty is not None:
+                        #    params[f'{param} Uncertainty'] = uncertainty
+                        print(f"Mass Match - exp: {exp} value: {value} standardized 10^24: {std_mass}")
+                        #print(f" ± {uncertainty}")
+                        #f uncertainty:
+                        #    print(f" ± {uncertainty}")
+                        break  # Exit the loop once a match is found
+            elif param == 'Mean Radius (km)':
+                # Try each pattern until a match is found
+                for pattern in pattern_list:
+                    match = re.search(pattern, data, flags=re.IGNORECASE)
+                    #print(f"\nParam: {param}")
+                    #print(f"Pattern: {pattern}")
+                    if match:
+                        value = match.group(1).strip()
+                        uncertainty = match.group(2).strip() if match.group(2) else None
+                        params[param] = value
+                        m_radius = value
+                        if uncertainty is not None:
+                            params[f'{param} Uncertainty'] = uncertainty
+                            m_radius_u = uncertainty
+                        print(f"Radius Match: {param} {value}")
+                        print(f" ± {uncertainty}")
+                        #f uncertainty:
+                        #    print(f" ± {uncertainty}")
+                        break  # Exit the loop once a match is found
+            elif param == 'Density (g/cm³)':
+                # Try each pattern until a match is found
+                value = None
+                #uncertainty = None
+                for pattern in pattern_list:
+                    match = re.search(pattern, data, flags=re.IGNORECASE)
+                    #print(f"\nParam: {param}")
+                    #print(f"Pattern: {pattern}")
+                    if match:
+                        value = float(match.group(1).strip())
+                        #uncertainty = float(match.group(2).strip()) if match.group(2) else None
+                        params[param] = value
+                        density_v = value
+                        #if uncertainty is not None:
+                        #    params[f'{param} Uncertainty'] = uncertainty
+                        print(f"Density Match: {param} {value}")
+                        #print(f" ± {uncertainty}")
+                        #if uncertainty:
+                        #    print(f" ± {uncertainty}")
+                        break  # Exit the loop once a match is found
+
+                if value is None:
+                    for pattern in density_negative_patterns:
+                        match = re.search(pattern, data, flags=re.IGNORECASE)
+                        #print(f"Density pattern: {pattern}")
+                        if match:
+                            value = float(match.group(1).strip())
+                            scaling_factor = 10 ** (6)
+
+                            # Standardize the mass
+                            std_density = value * scaling_factor
+                            params[param] = value
+                            density_v = value
+                            print(f"Density Match: {value}")
+                            break
+            elif param == 'Semi-Major Axis':
+                # Try each pattern until a match is found
+                value = None
+                for pattern in pattern_list:
+                    match = re.search(pattern, data, flags=re.IGNORECASE)
+                    #print(f"Semi major pat: {pattern}")
+                    if match:
+                        #print(f"Semi match: {match}")
+                        value = float(match.group(1).strip())
+                        params[param] = value
+                        sm_axis = value
+                        print(f"Match: {param} {value}")
+                        break  # Exit the loop once a match is found
+                
+                # If no direct semi-major axis match, try orbital period patterns
+                if value is None:
+                    for pattern in orb_period_patterns:
+                        match = re.search(pattern, data, flags=re.IGNORECASE)
+                        if match:
+                            print(f"Orb period pattern: {pattern}")
+                            orbital_period = float(match.group(1).strip())
+                            print(f"Semi Axis Match group 0 check: {match.group(0)}")
+                            if 'y' in match.group(0):
+                                print(f"Orb period value = {orbital_period} years")
+                                orbital_period_years = orbital_period
+                            else:
+                                # Convert orbital period (days) to years
+                                print(f"Orb period value = {orbital_period} days")
+                                orbital_period_years = orbital_period / 365.25
+                            value = float(self.calculate_semi_major_axis(orbital_period_years))
+                            params[param] = value
+                            sm_axis = value
+                            print(f"Match: {param} {value} (calculated from orbital period)")
+                            break
+
+            else:
+                match = re.search(pattern_list, data)
+                if match:
+                    
+                    value = match.group(1).strip()
+                    params[param] = value
+                    print(f"Else Param: {param}")
+                    print(f"Match: {value}")
+        
+
+
+        # Define the list of required headers for the DataFrame
+        headers = [
+            'Mass (kg)',
+            'Mean Radius (km)',
+            'Mean Radius (km) Uncertainty',
+            'Density (g/cm³)',
+            'Semi-Major Axis'
+        ]
+
+        # Initialize a dictionary to hold the standardized data
+        std_data = {}
+
+        for header in headers:
+            if f"{header}" in params:
+                std_data[header] = params[f"{header}"]
+            else:
+                continue
+
+        # Create the standardized DataFrame with each header as a column
+        daf = pd.DataFrame([std_data], columns=headers)
+
+        # Create DataFrame with extracted parameters
+        '''daf = pd.DataFrame({
+            'Parameter': list(params.keys()),
+            'Value': list(params.values())
+        })'''
+
+        # Print the DataFrame
+        #print(f"\nMajor body info:\n{daf}")
+
+        return float(mass_v), float(m_radius), float(m_radius_u), float(density_v), float(sm_axis)
+
+
+    # Preprocesses obs_params ephemeris data into dataframe parquet file (obs might actually not be necessary)       
+    def preprocess_ephemeris_obs(self, data: str, object_id: str) -> Optional[Path]:
+        """
+        Processes raw ephemeris data from JPL Horizons API and saves it as a Parquet file.
+        
+        Args:
+            data (str): Raw response string from the Horizons API
+            object_id (str): ID of the target object
+            
+        Returns:
+            Path: Path to the saved Parquet file if successful. None otherwise.
+        """
+        
+        # Define regex patterns for each parameter
+        # Total solar system mass is like 98% sun and 1.8% jupiter, potential value in prioritizing those centers and weighting them?
+        # still need to append daf on the end of the obs_dataframe
+        # Then merge the obs_dataframe with the vec_dataframe using datetime as leading standardized parameter
+        # 199 (Mercury) GM uncertainty incorrectly captured don't forget
+        # don't forget density g/cm^-3 conversion to g/cm^3 (including density uncertainties)
+        # Mean Radius (+ Uncertainty), GM (still failing empty GM 1-sigma values), Eccentricity complete
+        # Inclination still an issue (only available for small bodies through Horizons API)
+
+
+
+        gm_uncertainty_patterns = [
+            r'GM 1\-sigma\s*,?\s*\s*\(km\^3/s\^2\)\s*\s*=\s*\s*\+-\s*(\d+\.\d+)', # Variation 1
+            r'GM 1\-sigma\,\s*?\s*\s*km\^3/s\^2\s*\s*=\s*\s*\+-\s*(\d+\.\d+)',
+            r'GM 1\-sigma\s*\(\s*km^3/s^2\)\s*=\s*\+-\s*(\d+\.\d+)', #(?= ) # Variation 2
+            r'GM 1\-sigma\s*\(\s*km^3/s^2\)\s*=\s*\s*\+-(\d+\.\d+)(?= )', # Variation 3
+            r'GM 1\-sigma\s*,?\s*\(\s*km^3/s^2\)\s*=\s*(\d+\.\d+)', # Variation 4
+            #r'GM 1\-sigma\s*,?\s*km^3/s^2\s*=\s*\+-(\d+\.\d+)',
+            #r'GM 1\-sigma,\s*?km\^3/s\^2\s*=\s*\+-\s*(\d+\.\d+)',  # With uncertainty
+            #r'(?i)GM 1-sigma\,\s*km^3/s^2\s*=\s*(?:\+-?\d+\.\d+)',
+            #r'(?i)([GM,|GM])\s*km^3/s^2\s*=\s*(\d+\.\d+)(?:\+-?\s*)(\d+\.\d+)?', # Variation\
+            r'(?i)\bGM\s+1\-sigma\b\s*$\w+$\s*=\s*(?:\+\-)?\s*(\d+(?:\.\d+)?)',
+            r'(?i)GM\s+1\-sigma.*?\=\s*(?:\+\-)?\s*([0-9.]+)(?=\s*(?:\n|\S+\s+=|$))',
+            #r'(?i)GM\s+1\-sigma.*?\=\s*(\d+(?:\.\d+)?)'
+            #r'(?i)GM\s+1\-sigma.*?\=\s*([+-]?\d+(?:\.\d+)?)',
+            r'(?i)GM\s+1\-sigma\s*=\s*([+-]?\d+(?:\.\d+)?)',
+            r'(?i)GM\s+1\-sigma.*?\=\s*(?:\+\-)?\s*(\d+(?:\.\d+)?)', # Variation main
+            #r'(?i)GM\s+1\-sigma.*?\=\s*[+-]?\s*(\d+(?:\.\d+)?)\b'
+            #r'(?i)\bGM\s+1\-sigma\b\s*$(?:km^3/s^2)$\s*=\s*(\d+(?:\.\d+)?)',
+
+        ]
+
+        orb_period_patterns = [
+            r'(?i)orbital period\s*=\s*(\d+\.\d+) d',
+            #r'orbital period.*?\s+(\d+\.\d+)',
+            r'(?i)Sidereal orbital period\s*=\s*(\d+\.\d+) d',
+            r'(?i)\bsidereal\s+orb\.\s+per\,\s+y\s*=\s*(\d+\.\d+)',
+            r'(?i)\bsidereal\s+orb\.\s+per\.=\s*(\d+\.\d+)\s*y',
+            r'(?i)\bmean\s+sidereal\s+orb\s+per\s*=\s*(\d+\.\d+(?:[eE]\d+)?)\s*y',
+            r'(?i)\bSidereal orb\. per\.\s*=\s*(\d+\.\d+)\s*y?\b',
+            r'(?i)\bsidereal orb\. per\.\,\s+y =\s*(\d+\.\d+)?\b',
+            r'(?i)\bSidereal orbit period\s*=\s*(\d+\.\d+)\s*yr?\b',
+            r'(?i)\bSidereal orbit period\s*=\s*(\d+\.\d+)\s*y?\b',
+            r'(?i)orbital period,\s+~\s(\d+\.\d+)'
+        ]
+
+        aph_peri_list = [
+            #r'Perihelion.*?\s+(\d+\.\d+)\s+(\d+\.\d+)'
+            r'.*Solar Constant \(W/m\^2\)\s+(\d+)\s+(\d+)'
+
+        ]
+
+        density_negative_patterns = [
+            r'Density \(g cm\^\-3\)\s*\s*=\s*(\d+.\d+)',
+        ]
+        
+        patterns = {
+            'Mass (kg)': [
+                r'(?i)^.*x10\^(\d+).*=(\d+\.\d+)',
+                r'Mass x10\^(\d+) \(kg\)\s*=\s*(\d+.\d+)',
+                r'Mass, x10\^(\d+) kg\s*=\s*(\d+.\d+)',
+                r'Mass x 10\^(\d+) \(kg\)\s*\s*=\s*(\d+.\d+)',
+                #r'(?i)^.*x10\^(\d+).*=\s*(\d+\.?\d*([eE][+-]?\d+)?)'
+            ],
             'Mean Radius (km)': [
                 r'Vol\. mean radius, km\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 1
                 r'Mean radius \(km\)\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)',  # Variation 2
@@ -312,20 +557,13 @@ class HorizonsApiClient:
 
             ],
             'Density (g/cm³)': [
-                r'(?i)density\s*(?:,?\s*)?(?:$|\s)g/cm^3(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',
                 r'density \(g\/cm\^3\)\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 1
                 r'density \(g\/cm\^3\)\s*=\s*(\d+\.\d+)\s*\+-\s*(\d+\.\d+)',  # Variation 2
-                r'(?i)density\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 3
-                r'(?i)density\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.?\d*)\s*\+-?\s*(\d+\.?\d*)',  # Variation 4
-                r'(?i)density \(km\)\s*=\s*(\d+)\s*\+\-\s*(\d+)',  # Variation 5
+                #r'(?i)density\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)',  # Variation 3
+                #r'(?i)density\s*(?:,?\s*)?(?:$|\s)km(?:$|\s)?\s*=\s*(\d+\.?\d*)\s*\+-?\s*(\d+\.?\d*)',  # Variation 4
+                r'Density \(g\/cm\^3\)\s*\s*=\s*(\d+.\d+)',  # Variation 5
+                r'Density \(R=1195 km\)\s*\s*=\s*(\d+.\d+)',
                 r'(?i)density\s*,\s*km\s*=\s*(\d+\.\d+)\s*\+-?\s*(\d+\.\d+)'
-            ],
-            'Eccentricity': [
-                r'(?i)eccentricity\s*=\s*(\d+\.\d+)',
-                r'Eccentricity, e\s+~\s+(\d+)'
-            ],
-            'Inclination (deg)': [
-                r'(?i)inclination\s*=\s*(\d+\.\d+) deg',
             ],
             'Semi-Major Axis': [
                 r'(?i)Semi-major axis,\s+a\s*=\s*(\d+\.\d+)',
@@ -338,7 +576,30 @@ class HorizonsApiClient:
 
         params = {}
         for param, pattern_list in patterns.items():
-            if param == 'Mean Radius (km)':
+            if param == 'Mass (kg)':
+                # Try each pattern until a match is found
+                for pattern in pattern_list:
+                    match = re.search(pattern, data, flags=re.IGNORECASE)
+                    #print(f"\nParam: {param}")
+                    #print(f"Pattern: {pattern}")
+                    if match:
+                        exp = int(match.group(1).strip())
+                        value = float(match.group(2).strip())
+
+                        scaling_factor = 10 ** (exp - 24)
+
+                        # Standardize the mass
+                        std_mass = value * scaling_factor
+                        #std_mass_rounded = round(std_mass, 2)
+                        params[param] = std_mass
+                        #if uncertainty is not None:
+                        #    params[f'{param} Uncertainty'] = uncertainty
+                        print(f"Mass Match - exp: {exp} value: {value} standardized 10^24: {std_mass}")
+                        #print(f" ± {uncertainty}")
+                        #f uncertainty:
+                        #    print(f" ± {uncertainty}")
+                        break  # Exit the loop once a match is found
+            elif param == 'Mean Radius (km)':
                 # Try each pattern until a match is found
                 for pattern in pattern_list:
                     match = re.search(pattern, data, flags=re.IGNORECASE)
@@ -350,9 +611,10 @@ class HorizonsApiClient:
                         params[param] = value
                         if uncertainty is not None:
                             params[f'{param} Uncertainty'] = uncertainty
-                        print(f"Match: {param} {value}")
-                        if uncertainty:
-                            print(f" ± {uncertainty}")
+                        print(f"Radius Match: {param} {value}")
+                        print(f" ± {uncertainty}")
+                        #f uncertainty:
+                        #    print(f" ± {uncertainty}")
                         break  # Exit the loop once a match is found
             elif param == 'GM (km³/s²)':
                 # Try each pattern until a match is found
@@ -361,86 +623,69 @@ class HorizonsApiClient:
                     #print(f"\nParam: {param}")
                     #print(f"Pattern: {pattern}")
                     if match:
+                        #print(f"GM match: {match}")
                         value = match.group(1).strip()
                         uncertainty = match.group(2).strip() if match.group(2) else None
                         params[param] = value
                         if uncertainty is not None and value != uncertainty:
                             params[f'{param} Uncertainty'] = uncertainty
-                        print(f"Match: {param} {value}")
+                        print(f"GM Match: {param} {value}")
                     elif uncertainty is None:
                         for pat in gm_uncertainty_patterns:
                             umatch = re.search(pat, data, flags=re.IGNORECASE)
                             #print(f"\nPat Param: {param}")
                             #print(f"Pattern: {pat}")
                             if umatch:
-                                print(f"umatch: {umatch}")
+                                #print(f"umatch: {umatch}")
                                 uncertainty = umatch.group(1).strip()
                                 params[f'{param} Uncertainty'] = uncertainty
+                                print(f" ± {uncertainty}")
                                 break
                                 
-                        if uncertainty:
-                            print(f" ± {uncertainty}")
+                        #if uncertainty:
+                        #    print(f" ± {uncertainty}")
                         break  # Exit the loop once a match is found
             elif param == 'Density (g/cm³)':
                 # Try each pattern until a match is found
-                for pattern in pattern_list:
-                    match = re.search(pattern, data, flags=re.IGNORECASE)
-                    #print(f"\nParam: {param}")
-                    #print(f"Pattern: {pattern}")
-                    if match:
-                        value = match.group(1).strip()
-                        uncertainty = match.group(2).strip() if match.group(2) else None
-                        params[param] = value
-                        if uncertainty is not None:
-                            params[f'{param} Uncertainty'] = uncertainty
-                        print(f"Match: {param} {value}")
-                        if uncertainty:
-                            print(f" ± {uncertainty}")
-                        break  # Exit the loop once a match is found
-            elif param == 'Eccentricity':
-                # Try each pattern until a match is found
                 value = None
+                #uncertainty = None
                 for pattern in pattern_list:
                     match = re.search(pattern, data, flags=re.IGNORECASE)
                     #print(f"\nParam: {param}")
                     #print(f"Pattern: {pattern}")
                     if match:
-                        value = match.group(1).strip()
+                        value = float(match.group(1).strip())
+                        #uncertainty = float(match.group(2).strip()) if match.group(2) else None
                         params[param] = value
-                        #print(f"Match: {param} {value}")
+                        #if uncertainty is not None:
+                        #    params[f'{param} Uncertainty'] = uncertainty
+                        print(f"Density Match: {param} {value}")
+                        #print(f" ± {uncertainty}")
+                        #if uncertainty:
+                        #    print(f" ± {uncertainty}")
                         break  # Exit the loop once a match is found
+                # If no direct semi-major axis match, try orbital period patterns
                 if value is None:
-                    for pat in aph_peri_list:
-                        match = re.search(pat, data, flags=re.IGNORECASE)
-                        #print(f"Peri Pattern: {pat}")
+                    for pattern in density_negative_patterns:
+                        match = re.search(pattern, data, flags=re.IGNORECASE)
+                        #print(f"Density pattern: {pattern}")
                         if match:
-                            #print(f"peri_match: {umatch}")
-                            aphelion = float(match.group(1).strip())
-                            perihelion = float(match.group(2).strip())
-                            #print(f"aph: {aphelion} and peri: {perihelion}")
-                            value = self.calculate_eccentricity(perihelion, aphelion)
+                            value = float(match.group(1).strip())
+                            scaling_factor = 10 ** (6)
+
+                            # Standardize the mass
+                            std_density = value * scaling_factor
                             params[param] = value
-                            #print(f"Eccen Match: {param} {value}")
-                
-            elif param == 'Inclination (deg)':
-                # Try each pattern until a match is found
-                for pattern in pattern_list:
-                    match = re.search(pattern, data, flags=re.IGNORECASE)
-                    #print(f"\nParam: {param}")
-                    #print(f"Pattern: {pattern}")
-                    if match:
-                        value = match.group(1).strip()
-                        params[param] = value
-                        print(f"Match: {param} {value}")
-                        break  # Exit the loop once a match is found
+                            print(f"Density Match: {value}")
+                            break
             elif param == 'Semi-Major Axis':
                 # Try each pattern until a match is found
                 value = None
                 for pattern in pattern_list:
                     match = re.search(pattern, data, flags=re.IGNORECASE)
-                    print(f"Semi major pat: {pattern}")
+                    #print(f"Semi major pat: {pattern}")
                     if match:
-                        print(f"Semi match: {match}")
+                        #print(f"Semi match: {match}")
                         value = float(match.group(1).strip())
                         params[param] = value
                         print(f"Match: {param} {value}")
@@ -450,12 +695,17 @@ class HorizonsApiClient:
                 if value is None:
                     for pattern in orb_period_patterns:
                         match = re.search(pattern, data, flags=re.IGNORECASE)
-                        print(f"Orb period pattern: {pattern}")
                         if match:
+                            print(f"Orb period pattern: {pattern}")
                             orbital_period = float(match.group(1).strip())
-                            print(f"Orb period value = {orbital_period}")
-                            # Convert orbital period (days) to years
-                            orbital_period_years = orbital_period / 365.25
+                            print(f"Semi Axis Match group 0 check: {match.group(0)}")
+                            if 'y' in match.group(0):
+                                print(f"Orb period value = {orbital_period} years")
+                                orbital_period_years = orbital_period
+                            else:
+                                # Convert orbital period (days) to years
+                                print(f"Orb period value = {orbital_period} days")
+                                orbital_period_years = orbital_period / 365.25
                             value = float(self.calculate_semi_major_axis(orbital_period_years))
                             params[param] = value
                             print(f"Match: {param} {value} (calculated from orbital period)")
@@ -474,14 +724,13 @@ class HorizonsApiClient:
 
         # Define the list of required headers for the DataFrame
         headers = [
+            'Mass (kg)',
             'Mean Radius (km)',
             'Mean Radius (km) Uncertainty',
             'GM (km³/s²)',
             'GM (km³/s²) Uncertainty',
             'Density (g/cm³)',
             'Density (g/cm³) Uncertainty',
-            'Eccentricity',
-            'Inclination (deg)',
             'Semi-Major Axis'
         ]
 
@@ -518,6 +767,7 @@ class HorizonsApiClient:
                 return None
                 
             # Extract the data section between $$SOE and $$EOE
+            phys_data = data[:soe_start].strip()
             raw_data = data[soe_start+7:eoe_end].strip()
             
             if not raw_data:
@@ -527,6 +777,7 @@ class HorizonsApiClient:
             # Print raw data information for debugging
             #print(f"Raw data length: {len(raw_data)}")
             #print(f"First 200 chars: {raw_data[:200]}")
+            print(f"\n{phys_data}")
 
             # Approach: Use regex to find each data point directly
             
@@ -633,8 +884,8 @@ class HorizonsApiClient:
             
             # Add metadata columns
             df['object_id'] = object_id
-            df['object_name'] = obj_name
-            df['reference_frame'] = 'ICRF'
+            #df['object_name'] = obj_name
+            #df['reference_frame'] = 'ICRF'
 
             #print(f"\nObject ID {object_id} df contents: {df}\n")
             
@@ -664,7 +915,11 @@ class HorizonsApiClient:
             return None
 
     # Preprocesses vec_params ephemeris data into dataframe parquet file
-    def preprocess_ephemeris_vec(self, data: str, object_id: str) -> Optional[Path]:
+    def preprocess_ephemeris_vec(
+        self,
+        data: str,
+        object_id: str,
+    ) -> Optional[Path]:
         """
         Processes raw ephemeris data from JPL Horizons API and saves it as a Parquet file.
         
@@ -686,6 +941,7 @@ class HorizonsApiClient:
                 return None
                 
             # Extract the data section between $$SOE and $$EOE
+            phys_data = data[:soe_start].strip()
             raw_data = data[soe_start+5:eoe_end].strip()
             
             if not raw_data:
@@ -693,8 +949,26 @@ class HorizonsApiClient:
                 return None
             
             # Print raw data information for debugging
-            print(f"Raw data length: {len(raw_data)}")
-            print(f"First 200 chars: {raw_data[:200]}")
+            print(f"Raw data length: {len(raw_data)}\n")
+            #print(f"First 200 chars: {raw_data[:200]}")
+            #print(f"{phys_data}")
+            mass = float('inf')
+            m_radius = float('inf')
+            m_radius_uncertainty = float('inf')
+            density = float('inf')
+            sm_axis = float('inf')
+
+            mass, m_radius, m_radius_uncertainty, density, sm_axis = self.preprocess_phys_data(phys_data)
+            surface_g = self.calculate_surface_gravity(mass, m_radius)
+
+            print(f"\nMass: {mass}")
+            print(f"\nMean Radius: {m_radius}")
+            print(f"\nMean Radius Uncertainty: {m_radius_uncertainty}")
+            print(f"\nDensity: {density}")
+            print(f"\nSemi-Major Axis: {sm_axis}")
+            print(f"\nSurface Gravity: {surface_g}")
+
+
             
             # Approach: Use regex to find each data point directly
             
@@ -713,6 +987,8 @@ class HorizonsApiClient:
             
             # Initialize list to store parsed data
             data_rows = []
+            min_distance = float('inf')
+            max_distance = 0.0
             
             # Process each data block
             for i, (pos, jdtdb_str) in enumerate(jdtdb_positions):
@@ -753,6 +1029,9 @@ class HorizonsApiClient:
                     vz = float(vz_match.group(1))
                     
                     # Extract LT, RG, RR using regex
+                    # LT = Light Travel Time from target object to the observer site (days)
+                    # RG = Range, or distance between observer and target object
+                    # RR = Range Rate, rate of change of distance between observer and target object, measured in AU per day
                     lt_match = re.search(r'LT\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
                     rg_match = re.search(r'RG\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
                     rr_match = re.search(r'RR\s*=\s*([-+]?\d+\.\d+[Ee][-+]?\d+)', block)
@@ -764,6 +1043,16 @@ class HorizonsApiClient:
                     lt = float(lt_match.group(1))
                     rg = float(rg_match.group(1))
                     rr = float(rr_match.group(1))
+
+                    # Update minimum and maximum distances with corresponding times
+                    if rg < min_distance:
+                        min_distance = rg
+                    if rg > max_distance:
+                        max_distance = rg
+
+                    r = np.array([x,y,z])
+                    v = np.array([vx,vy,vz])
+                    inc = (90-self.calculate_inclination(r,v))
                     
                     # Convert JDTDB to datetime
                     dt = self.jdtdb_to_datetime(jdtdb)
@@ -780,7 +1069,8 @@ class HorizonsApiClient:
                         'VZ': vz,
                         'LT': lt,
                         'RG': rg,
-                        'RR': rr
+                        'RR': rr,
+                        'Inclination': inc
                     })
                     
                     # Print progress
@@ -798,12 +1088,22 @@ class HorizonsApiClient:
             
             df = pd.DataFrame(data_rows)
             print(f"\nSuccessfully parsed {len(data_rows)} data points for {object_id}")
+            #print(f"{object_id} Dataframe: {df}")
+            print(f"\nMin distance (perihelion): {min_distance}\nMax distance (aphelion): {max_distance}")
             
             # Get object name
             obj_name = self.get_object_name(object_id)
-            print(f"\nObject ID {object_id} is {obj_name}\n")
+            #print(f"\nObject ID {object_id} is {obj_name}\n")
             
             # Add metadata columns
+            df['Mass'] = mass # (kg)
+            df['Mean Volume Radius'] = m_radius
+            df['Mean Volume Radius Uncertainty'] = m_radius_uncertainty
+            df['Eccentricity'] = self.calculate_eccentricity(min_distance, max_distance)
+            # Inclination (defines shape and orientation of orbit, affecting position and velocity vectors over time)
+            df['Semi-Major Axis'] = sm_axis # Semi-Major axis (determines scale of the orbit)
+            df['Density'] = density # Density k/m^3 (influences gravitational interactions with other bodies)
+            df['Surface Gravity'] = self.calculate_surface_gravity(mass, m_radius) # Surface Gravity (affects the trajectory of objects near the planet or moon) calculated with g = GM/R^2 (G gravitational constant, M mass, R radius)
             df['object_id'] = object_id
             df['object_name'] = obj_name
             df['reference_frame'] = 'Ecliptic of J2000.0'
@@ -826,7 +1126,7 @@ class HorizonsApiClient:
             )
             
             print(f"Successfully saved ephemeris data for {object_id} to {output_path}")
-            print(f"DataFrame contains {len(df)} rows with columns: {df.columns.tolist()}")
+            #print(f"DataFrame contains {len(df)} rows with columns: {df.columns.tolist()}")
             
             return output_path
             
@@ -834,7 +1134,7 @@ class HorizonsApiClient:
             print(f"Error processing ephemeris data for {object_id}: {str(e)}")
             traceback.print_exc()
             return None
-        
+
     def jdtdb_to_datetime(self, jdtdb: float) -> datetime:
         """
         Converts a Julian Date in TDB to a Python datetime object.
@@ -853,6 +1153,62 @@ class HorizonsApiClient:
         
         return ra * 180 / np.pi, dec * 180 / np.pi
     
+    def calculate_inclination(self, r: float, v: float):
+        """
+        Calculate the orbital inclination using the position and velocity vectors.
+
+        Parameters:
+            r (numpy array): Position vector in meters.
+            v (numpy array): Velocity vector in meters per second.
+
+        Returns:
+            float: Inclination angle in degrees.
+        """
+        # Compute specific angular momentum
+        h = np.cross(r, v)
+        
+        # Calculate the magnitude of h
+        h_magnitude = np.linalg.norm(h)
+        
+        if h_magnitude == 0:
+            return 0.0  # Avoid division by zero
+        
+        # Calculate sine of inclination
+        sin_i = h[2] / h_magnitude
+
+        # Ensure sin_i is within the valid range for arcsin
+        sin_i_clipped = np.clip(sin_i, -1.0, 1.0)
+        
+        # Use arcsin to find the inclination in radians
+        i_rad = np.arcsin(sin_i_clipped)
+        
+        # Convert to degrees and ensure it's within [0, 180]
+        i_deg = np.degrees(i_rad)
+        
+        if i_deg < 0:
+            i_deg += 360
+        
+        return min(i_deg, 180.0)
+
+    
+    def calculate_surface_gravity(self, mass: float, radius: float):
+        """
+        Calculate the surface gravity of a body.
+        
+        Args:
+            mass (float): Mass of the body in 10^24 kg.
+            radius (float): Radius of the body in km (converted to meters).
+            
+        Returns:
+            float: Surface gravity in m/s^2.
+        """
+        G = 6.67430e-11
+        M_body = mass * (10**24)
+        R_body = radius * 1000
+        g = (G * M_body) / (R_body**2)
+
+        return g
+    
     def calculate_semi_major_axis(self, orbital_period_years):
         """
         Calculate the semi-major axis of a planet's orbit using Kepler's Third Law.
@@ -864,7 +1220,7 @@ class HorizonsApiClient:
             float: Semi-major axis in kilometers.
         """
         # Gravitational constant [m^3 kg^-1 s^-2]
-        G = 6.67430e-11
+        G = 6.67430e-11 #If data discrepancy likely unit constistency change to 6.67430e-20
         # Mass of the Sun [kg]
         M_sun = 1.9885e30
         # Convert orbital period from years to seconds
@@ -885,8 +1241,8 @@ class HorizonsApiClient:
         Calculate the orbital eccentricity given the perihelion and aphelion distances.
         
         Parameters:
-            perihelion (float): The distance of perihelion in astronomical units (AU).
-            aphelion (float): The distance of aphelion in astronomical units (AU).
+            perihelion (float): The distance of perihelion.
+            aphelion (float): The distance of aphelion.
             
         Returns:
             float: The orbital eccentricity.
@@ -936,6 +1292,14 @@ class HorizonsApiClient:
         # 8XX or 8XXXX prefix denotes a Neptunian Satellite
 
         object_names = {
+            '1': 'Mercury Barycenter',
+            '2': 'Venus Barycenter',
+            '3': 'Earth Barycenter',
+            '4': 'Mars Barycenter',
+            '5': 'Jupiter Barycenter',
+            '6': 'Saturn Barycenter',
+            '7': 'Uranus Barycenter',
+            '8': 'Neptune Barycenter',
             '10': 'Sun',
             '199': 'Mercury',
             '299': 'Venus',
@@ -1237,7 +1601,7 @@ class HorizonsApiClient:
             '903': 'Hydra(PIII)',
             '904': 'Kerberos(2011P1)',
             '905': 'Styx(2012P1)',
-            #'301': 'Asteroid Belt'
+            '999': 'Pluto'
         }
         
         return object_names.get(object_id, 'Unknown Object')
@@ -1314,24 +1678,59 @@ class HorizonsApiClient:
 def main():
     # List of objects to fetch (example list)
     objects_to_fetch = [
+        #"1",
+        #"2",
+        #"3",
+        #"4",
+        #"5",
+        #"6",
+        #"7",
+        #"8",
+        #"9",
         "199",
         "299",
-        "301",      # Moon
+        #"301",      # Moon
         #"399",     # Earth
         #"401",     # Phobos
         "499",
-        "502",     # Europa
-        "503",      # Ganymede
+        #"502",     # Europa
+        #"503",     # Ganymede
         "599",
         "699",
         "799",
         "899",
-        #"999"
-        #"2000001", # Ceres
-        #"2000002", # Pallas
-        #"2000003", # Vesta
-        #"141P",    # Comet Machholz 2
-        #"DELD98A"  # Example asteroid designation
+        "999"
+    ]
+
+    center_points = [
+        "@10", # might not need so many earth observer sites, focus on orbits? eg. @10 sun for all planets, 500@399 earth for moon, 500@599 jupiter for its satellites
+        "009@399",
+        "016@399",
+        "026@399",
+        "043@399",
+        "057@399",
+        "066@399",
+        "069@399",
+        "098@399",
+        "132@399",
+        "187@399",
+        "197@399",
+        "200@399",
+        "209@399",
+        "217@399",
+        "271@399",
+        "300@399",
+        "348@399",
+        "433@399",
+        "500@399",
+        "506@399",
+        "536@399",
+        "548@399",
+        "627@399",
+        "758@399",
+        "828@399",
+        "861@399",
+        "918@399"
     ]
     
     # Initialize the Horizons client
@@ -1345,22 +1744,14 @@ def main():
 
     for obj in objects_to_fetch:
         print(f"\nFetching ephemeris_data for {obj}: ")
-        result = client.fetch_ephemeris_obs(object_id=obj)
-        #result = client.fetch_ephemeris_vec(object_id=obj)
+        #result = client.fetch_ephemeris_obs(object_id=obj)
+        result = client.fetch_ephemeris_vec(object_id=obj)
         #print(f"\n Payload: {result}")
         if result is None:
             #print(f"\n Analyzing data for object: {obj}")
             #client.analyze_parquet_file(result)
             #print("Failed to fetch ephemeris data for object:", obj)
             continue
-            
-        '''df = client.preprocess_ephemeris(result, object_id=obj)
-        if df is not None and not df.empty:
-            print(f"\nDataframe Shape: {df.shape}")
-            print("\nFirst few rows of the dataframe:")
-            print(df.head())
-        else:
-            print("No valid data was processed for object:", obj)'''
 
 
         
